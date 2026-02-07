@@ -1,0 +1,78 @@
+# OpenClaw netsec docker stack (offline Zeek + optional RITA)
+#
+# Host directory layout (bind mounts) relative to $HOMENETSEC_WORKDIR (defaults to ./output when running via scripts):
+#   pcaps/        -> PCAP staging (pulled from OPNsense)
+#   zeek-logs/    -> Zeek output logs
+#   zeek-flat/    -> Flattened Zeek logs for RITA import
+#   rita-data/    -> RITA outputs (summary + optional exports)
+#
+# Usage patterns:
+#   - Run Zeek offline on a specific pcap (one-shot):
+#       docker compose --profile zeek run --rm zeek-offline /pcaps/YYYY-MM-DD/file.pcap
+#   - Keep mongo running only when you want RITA:
+#       docker compose --profile rita up -d mongo
+#   - Use RITA one-shot commands (host script will do this):
+#       docker compose --profile rita run --rm rita import ...
+
+services:
+  mongo:
+    # RITA v4.8.0 requires MongoDB >=4.2 <4.3.
+    # NOTE: WiredTiger storage formats are upgrade-only; if you previously ran a newer Mongo against this volume,
+    # you must use a fresh volume (or restore a compatible backup).
+    image: mongo:4.2.24
+    container_name: rita-mongo
+    restart: unless-stopped
+    profiles: ["rita"]
+    volumes:
+      - mongo-data-v42:/data/db
+    networks:
+      - rita-net
+
+  # Zeek offline runner (one-shot). No NET_ADMIN/NET_RAW required.
+  zeek-offline:
+    image: blacktop/zeek:latest
+    container_name: zeek-offline
+    profiles: ["zeek"]
+    restart: "no"
+    working_dir: /work
+    volumes:
+      - ${HOMENETSEC_WORKDIR:-./output}/zeek-logs:/out
+      - ${HOMENETSEC_WORKDIR:-./output}/pcaps:/pcaps:ro
+    # NOTE: We pass the pcap path via an env var (PCAP) so `docker compose run` doesn't have to override command.
+    entrypoint: ["/bin/sh", "-lc"]
+    # Env var PCAP must be set by the caller, e.g. PCAP=/pcaps/2026-02-05/file.pcap
+    command: >
+      'set -euo pipefail;
+       : "$${PCAP:?PCAP env var must be set (e.g. /pcaps/YYYY-MM-DD/file.pcap)}";
+       BN=$$(basename "$$PCAP");
+       DAYDIR=$$(basename "$$(dirname "$$PCAP")");
+       OUTDIR="/out/$${DAYDIR}/$${BN}.zeek";
+       mkdir -p "$$OUTDIR";
+       echo "[zeek] processing $$PCAP -> $$OUTDIR";
+       cd "$$OUTDIR";
+       zeek -r "$$PCAP" >/dev/null;
+       echo "[zeek] done"'
+
+  # RITA CLI runner (one-shot). Note: this image's entrypoint is `rita`.
+  # We do NOT override entrypoint/command here; the host script calls `docker compose run rita <subcommand> ...`.
+  rita:
+    image: quay.io/activecm/rita:latest
+    container_name: rita
+    profiles: ["rita"]
+    depends_on:
+      - mongo
+    networks:
+      - rita-net
+    volumes:
+      - ${HOMENETSEC_WORKDIR:-./output}/zeek-logs:/logs:ro
+      - ${HOMENETSEC_WORKDIR:-./output}/zeek-flat:/logs-flat:ro
+      - ${HOMENETSEC_WORKDIR:-./output}/rita-data:/out
+    environment:
+      - RITA_MONGODB_URI=mongodb://mongo:27017/rita
+
+volumes:
+  mongo-data-v42:
+
+networks:
+  rita-net:
+    driver: bridge

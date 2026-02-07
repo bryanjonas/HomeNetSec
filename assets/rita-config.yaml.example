@@ -1,0 +1,123 @@
+
+UserConfig:
+  UpdateCheckFrequency: 14
+MongoDB:
+  ConnectionString: mongodb://mongo:27017/rita
+  AuthenticationMechanism: ""
+  SocketTimeout: 2h0m0s
+  TLS:
+    Enable: false
+    VerifyCertificate: false
+    CAFile: ""
+  MetaDB: MetaDatabase
+Rolling:
+  DefaultChunks: 24
+  rolling: false
+  currentchunk: 0
+  totalchunks: 0
+LogConfig:
+  LogLevel: 2
+  RitaLogPath: /var/lib/rita/logs
+  LogToFile: true
+  LogToDB: true
+BlackListed:
+  Enabled: true
+  feodotracker.abuse.ch: true
+  BlacklistDatabase: rita-bl
+  CustomIPBlacklists: []
+  CustomHostnameBlacklists: []
+Beacon:
+  Enabled: true
+  DefaultConnectionThresh: 23
+  TimestampScoreWeight: 0.25
+  DatasizeScoreWeight: 0.25
+  DurationScoreWeight: 0.25
+  HistogramScoreWeight: 0.25
+  DurationMinHoursSeen: 6
+  DurationConsistencyIdealHoursSeen: 12
+  HistogramBimodalBucketSize: 0.05
+  HistogramBimodalOutlierRemoval: 1
+  HistogramBimodalMinHoursSeen: 11
+BeaconProxy:
+  Enabled: true
+  DefaultConnectionThresh: 23
+  TimestampScoreWeight: 0.333
+  DurationScoreWeight: 0.333
+  HistogramScoreWeight: 0.333
+  DurationMinHoursSeen: 6
+  DurationConsistencyIdealHoursSeen: 12
+  HistogramBimodalBucketSize: 0.05
+  HistogramBimodalOutlierRemoval: 1
+  HistogramBimodalMinHoursSeen: 11
+BeaconSNI:
+  Enabled: true
+  DefaultConnectionThresh: 23
+  TimestampScoreWeight: 0.25
+  DatasizeScoreWeight: 0.25
+  DurationScoreWeight: 0.25
+  HistogramScoreWeight: 0.25
+  DurationMinHoursSeen: 6
+  DurationConsistencyIdealHoursSeen: 12
+  HistogramBimodalBucketSize: 0.05
+  HistogramBimodalOutlierRemoval: 1
+  HistogramBimodalMinHoursSeen: 11
+DNS:
+  Enabled: true
+UserAgent:
+  Enabled: true
+Bro:
+  MetaDB: ""
+Filtering:
+  AlwaysInclude: []
+  NeverInclude:
+  - 0.0.0.0/32
+  - 127.0.0.0/8
+  - 169.254.0.0/16
+  - 224.0.0.0/4
+  - 255.255.255.255/32
+  - ::1/128
+  - fe80::/10
+  - ff00::/8
+  InternalSubnets:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  AlwaysIncludeDomain: []
+  NeverIncludeDomain: []
+  FilterExternalToInternal: true
+Strobe:
+  ConnectionLimit: 86400
+version: v4.8.0
+exactversion: v4.8.0-0-gdd1acf9
+
+
+log:
+  ritalogtable: logs
+dns:
+  explodeddnstable: explodedDns
+  hostnamestable: hostnames
+structure:
+  conntable: conn
+  dnstable: dns
+  hosttable: host
+  httptable: http
+  openconntable: openconn
+  ssltable: ssl
+  uniqueconntable: uconn
+  uniqueconnproxytable: uconnProxy
+  sniconntable: SNIconn
+beacon:
+  beacontable: beacon
+beaconsni:
+  beaconsnitable: beaconSNI
+beaconproxy:
+  beaconproxytable: beaconProxy
+useragent:
+  useragenttable: useragent
+cert:
+  certificatetable: cert
+meta:
+  filestable: files
+  databasestable: databases
+
+Failed to connect to database: no reachable servers
