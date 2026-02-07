@@ -68,11 +68,16 @@ pull_pcaps() {
   scp_base=(scp -i "$OPNSENSE_KEY" -o BatchMode=yes -o ConnectTimeout=8)
 
   # Filenames embed timestamps, so lexicographic sort corresponds to time order.
-  list=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
-    "ls -1 $OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap* 2>/dev/null | sort" || true)
+  # IMPORTANT: if SSH cannot list pcaps (auth/network/permissions), fail fast.
+  if ! list=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
+    "ls -1 $OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap* 2>/dev/null | sort"); then
+    echo "[homenetsec] ERROR: PCAP pull failed (SSH to $OPNSENSE_USER@$OPNSENSE_HOST could not list $OPNSENSE_PCAP_DIR)."
+    echo "[homenetsec]        Fix SSH/auth/permissions or set SKIP_PCAP_PULL=1 if you are using local pcaps."
+    return 1
+  fi
 
   if [[ -z "$list" ]]; then
-    echo "[homenetsec] No pcaps found on OPNsense for $DAY (or SSH blocked)."
+    echo "[homenetsec] No pcaps found on OPNsense for $DAY."
     return 0
   fi
 
