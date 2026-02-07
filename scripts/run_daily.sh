@@ -56,28 +56,46 @@ pull_pcaps() {
     return 0
   fi
 
+  # Avoid copying a PCAP file while tcpdump/daemon is still writing it.
+  # Default: skip the newest 2 matching files (configurable).
+  local skip_newest_n="${PULL_SKIP_NEWEST_N:-2}"
+
   local list
   local -a ssh_base scp_base
   ssh_base=(ssh -i "$OPNSENSE_KEY" -o BatchMode=yes -o ConnectTimeout=8)
   scp_base=(scp -i "$OPNSENSE_KEY" -o BatchMode=yes -o ConnectTimeout=8)
 
+  # Filenames embed timestamps, so lexicographic sort corresponds to time order.
   list=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
-    "ls -1 $OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap* 2>/dev/null" || true)
+    "ls -1 $OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap* 2>/dev/null | sort" || true)
 
   if [[ -z "$list" ]]; then
     echo "[homenetsec] No pcaps found on OPNsense for $DAY (or SSH blocked)."
     return 0
   fi
 
-  while IFS= read -r remote; do
+  mapfile -t files <<< "$list"
+  local total=${#files[@]}
+  if (( total <= skip_newest_n )); then
+    echo "[homenetsec] Found $total pcaps; skipping pull because skip_newest_n=$skip_newest_n"
+    return 0
+  fi
+
+  local upto=$(( total - skip_newest_n ))
+  local i
+  for (( i=0; i<upto; i++ )); do
+    local remote="${files[$i]}"
     [[ -z "$remote" ]] && continue
+
     local base
     base=$(basename "$remote")
     if [[ ! -f "$PCAP_DIR/$base" ]]; then
       echo "[homenetsec] pulling $remote"
       ${scp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST:$remote" "$PCAP_DIR/$base" >/dev/null
     fi
-  done <<< "$list"
+  done
+
+  echo "[homenetsec] pull complete (skipped newest $skip_newest_n file(s) to avoid partial copies)"
 }
 
 run_zeek_docker() {
