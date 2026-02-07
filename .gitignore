@@ -1,0 +1,32 @@
+# HomeNetSec: do not commit sensitive/large runtime data
+
+# PCAPs
+pcaps/
+output/pcaps/
+
+# Zeek outputs
+zeek-logs/
+zeek-flat/
+output/zeek-logs/
+output/zeek-flat/
+
+# RITA outputs / datasets
+rita-data/
+output/rita-data/
+
+# Reports (keep templates, not generated files)
+reports/
+output/reports/
+
+# Mongo volume data (if stored locally)
+mongo-data*/
+
+# Secrets
+.env
+*.env
+credentials/
+
+# OS/editor
+.DS_Store
+*.swp
+*.tmp
