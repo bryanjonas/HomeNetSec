@@ -36,6 +36,7 @@ OPNSENSE_PCAP_DIR="${OPNSENSE_PCAP_DIR:-/var/log/pcaps}"
 
 # Controls
 RUN_RITA="${RUN_RITA:-1}"
+RUN_JA4="${RUN_JA4:-1}"  # run Suricata offline TLS fingerprint extraction
 PCAP_RETENTION_DAYS="${PCAP_RETENTION_DAYS:-7}"
 ZEEK_LOG_RETENTION_DAYS="${ZEEK_LOG_RETENTION_DAYS:-30}"
 
@@ -190,6 +191,36 @@ ensure_mongo_ready() {
   echo "[homenetsec] ERROR: mongo did not become ready within ${timeout_s}s"
   docker logs --tail=80 rita-mongo 2>/dev/null || true
   return 1
+}
+
+run_suricata_ja4() {
+  if [[ "$RUN_JA4" != "1" ]]; then
+    echo "[homenetsec] JA4 disabled (RUN_JA4=$RUN_JA4)"
+    return 0
+  fi
+
+  # Skip if no pcaps
+  shopt -s nullglob
+  local pcaps=("$PCAP_DIR"/*.pcap*)
+  if (( ${#pcaps[@]} == 0 )); then
+    echo "[homenetsec] No pcaps found for JA4 extraction at $PCAP_DIR"
+    return 0
+  fi
+
+  mkdir -p "$WORKDIR/suricata/$DAY"
+
+  echo "[homenetsec] suricata(docker) ja4 extraction for $DAY"
+  compose --profile ja4 run --rm -e DAY="$DAY" suricata-offline || {
+    echo "[homenetsec] WARN: suricata run failed; continuing";
+    return 0;
+  }
+
+  local eve="$WORKDIR/suricata/$DAY/eve.json"
+  if [[ -f "$eve" ]]; then
+    python3 "$ROOT_DIR/scripts/ja4_extract.py" --day "$DAY" --eve "$eve" --db "$BASELINE_DB" || true
+  else
+    echo "[homenetsec] WARN: suricata eve.json missing at $eve"
+  fi
 }
 
 run_rita_docker() {
@@ -435,6 +466,10 @@ main() {
   require_docker
 
   pull_pcaps
+
+  # TLS fingerprints (JA4/JA3) from Suricata are independent of Zeek/RITA.
+  run_suricata_ja4
+
   run_zeek_docker
   run_rita_docker
 

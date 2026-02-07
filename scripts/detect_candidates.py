@@ -9,6 +9,7 @@ Signals implemented (v1):
 - watch-port tuple novelty
 - high-fanout internal hosts (unique external dsts)
 - RITA beacons above score threshold (if summary file exists)
+- new TLS fingerprints (JA4/JA3) vs lookback
 
 Quality gates:
 - allowlist by dst IP, rdns suffix, domain suffix
@@ -172,6 +173,21 @@ def main() -> int:
         (day,),
     ))
 
+    # New TLS fingerprints (JA4/JA3)
+    # Baseline DB may not have TLS tables yet (first runs or JA4 disabled); treat as empty.
+    try:
+        today_fps = set(tuple(r) for r in db.execute(
+            "SELECT DISTINCT src_ip, dst_ip, fp_type, fp_value FROM day_tls_fp_counts WHERE day=?",
+            (day,),
+        ))
+        hist_fps = set(tuple(r) for r in db.execute(
+            "SELECT DISTINCT src_ip, dst_ip, fp_type, fp_value FROM day_tls_fp_counts WHERE day IN (%s)" % (" ,".join("?" * len(days))),
+            days,
+        )) if days else set()
+        new_fps = sorted(today_fps - hist_fps)
+    except sqlite3.OperationalError:
+        new_fps = []
+
     # RITA beacons
     rita_summary = os.path.join(workdir, "rita-data", f"rita-summary-{day}.txt")
     rita_beacons = parse_rita_beacons(rita_summary, args.rita_min_score)
@@ -192,6 +208,19 @@ def main() -> int:
         if is_allowlisted_dst(dst, name, allow):
             continue
         new_watch_items.append({"src_ip": src, "dst_ip": dst, "dst_port": port, "rdns": name})
+
+    new_fp_items = []
+    for src, dst, fp_type, fp_value in new_fps:
+        name = rdns(dst)
+        if is_allowlisted_dst(dst, name, allow):
+            continue
+        new_fp_items.append({
+            "src_ip": src,
+            "dst_ip": dst,
+            "dst_rdns": name,
+            "fp_type": fp_type,
+            "fp_value": fp_value,
+        })
 
     # Filter RITA beacons by allowlist (dst)
     filtered_beacons = []
@@ -225,6 +254,7 @@ def main() -> int:
             "new_watch_tuples": new_watch_items[:50],
             "high_fanout_hosts": fanout_items[:50],
             "rita_beacons": sorted(filtered_beacons, key=lambda x: x.get("score", 0), reverse=True)[:50],
+            "new_tls_fingerprints": new_fp_items[:50],
         },
         "counts": {
             "new_external_destinations": len(new_dst_items),
@@ -232,6 +262,7 @@ def main() -> int:
             "new_watch_tuples": len(new_watch_items),
             "high_fanout_hosts": len(fanout_items),
             "rita_beacons": len(filtered_beacons),
+            "new_tls_fingerprints": len(new_fp_items),
         },
         "quality_gates": {
             "allowlist": args.allowlist or "",
