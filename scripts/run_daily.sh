@@ -26,6 +26,7 @@ REPORT_DIR="$WORKDIR/reports"
 STATE_DIR="$WORKDIR/state"
 BASELINE_DB="$STATE_DIR/baselines.sqlite"
 CANDIDATES_PATH="$STATE_DIR/${DAY}.candidates.json"
+JA4DB_PATH="${JA4DB_PATH:-$STATE_DIR/ja4+_db.json}"
 REPORT_PATH="$REPORT_DIR/$DAY.txt"
 
 # OPNsense pull settings
@@ -172,7 +173,21 @@ PY
 
 ensure_mongo_ready() {
   local timeout_s="${1:-60}"
-  compose --profile rita up -d mongo
+
+  # Bring up Mongo for RITA. If a stale container named "rita-mongo" exists from a prior run
+  # (or a different compose project), Docker can throw a name conflict. In that case, remove
+  # the container and retry (the named volume is preserved).
+  local up_out
+  if ! up_out=$(compose --profile rita up -d mongo 2>&1); then
+    if echo "$up_out" | grep -qiE 'container name "/?rita-mongo" is already in use|Conflict\. The container name'; then
+      echo "[homenetsec] WARN: mongo container name conflict; removing stale rita-mongo and retrying"
+      docker rm -f rita-mongo >/dev/null 2>&1 || true
+      compose --profile rita up -d mongo
+    else
+      echo "$up_out"
+      return 1
+    fi
+  fi
 
   local start end
   start=$(date +%s)
@@ -478,6 +493,11 @@ main() {
     --day "$DAY" \
     --zeek-flat-dir "$ZEEK_FLAT_ROOT" \
     --db "$BASELINE_DB" || true
+
+  # Optional enrichment: import JA4DB fingerprint catalog into baseline DB.
+  if [[ -f "$JA4DB_PATH" ]]; then
+    python3 "$ROOT_DIR/scripts/ja4db_import.py" --db "$BASELINE_DB" --ja4db "$JA4DB_PATH" || true
+  fi
 
   python3 "$ROOT_DIR/scripts/detect_candidates.py" \
     --day "$DAY" \
