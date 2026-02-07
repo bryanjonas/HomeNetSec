@@ -23,6 +23,9 @@ ZEEK_ROOT="$WORKDIR/zeek-logs/$DAY"
 ZEEK_FLAT_ROOT="$WORKDIR/zeek-flat/$DAY"
 RITA_DATA_DIR="$WORKDIR/rita-data"
 REPORT_DIR="$WORKDIR/reports"
+STATE_DIR="$WORKDIR/state"
+BASELINE_DB="$STATE_DIR/baselines.sqlite"
+CANDIDATES_PATH="$STATE_DIR/${DAY}.candidates.json"
 REPORT_PATH="$REPORT_DIR/$DAY.txt"
 
 # OPNsense pull settings
@@ -36,7 +39,7 @@ RUN_RITA="${RUN_RITA:-1}"
 PCAP_RETENTION_DAYS="${PCAP_RETENTION_DAYS:-7}"
 ZEEK_LOG_RETENTION_DAYS="${ZEEK_LOG_RETENTION_DAYS:-30}"
 
-mkdir -p "$PCAP_DIR" "$ZEEK_ROOT" "$ZEEK_FLAT_ROOT" "$RITA_DATA_DIR" "$REPORT_DIR"
+mkdir -p "$PCAP_DIR" "$ZEEK_ROOT" "$ZEEK_FLAT_ROOT" "$RITA_DATA_DIR" "$REPORT_DIR" "$STATE_DIR"
 
 require_docker() {
   command -v docker >/dev/null 2>&1 || { echo "[homenetsec] ERROR: docker CLI not found"; return 127; }
@@ -48,6 +51,11 @@ compose() {
 }
 
 pull_pcaps() {
+  if [[ "${SKIP_PCAP_PULL:-0}" == "1" ]]; then
+    echo "[homenetsec] SKIP_PCAP_PULL=1 (skipping PCAP pull step)"
+    return 0
+  fi
+
   local list
   local -a ssh_base scp_base
   ssh_base=(ssh -i "$OPNSENSE_KEY" -o BatchMode=yes -o ConnectTimeout=8)
@@ -73,6 +81,11 @@ pull_pcaps() {
 }
 
 run_zeek_docker() {
+  if [[ "${SKIP_ZEEK:-0}" == "1" ]]; then
+    echo "[homenetsec] SKIP_ZEEK=1 (skipping Zeek processing)"
+    return 0
+  fi
+
   shopt -s nullglob
   local pcaps=("$PCAP_DIR"/lan-${DAY}_*.pcap*)
   if (( ${#pcaps[@]} == 0 )); then
@@ -104,6 +117,11 @@ run_zeek_docker() {
 }
 
 flatten_zeek_logs_for_rita() {
+  if [[ "${SKIP_FLATTEN:-0}" == "1" ]]; then
+    echo "[homenetsec] SKIP_FLATTEN=1 (skipping Zeek flatten step)"
+    return 0
+  fi
+
   mkdir -p "$ZEEK_FLAT_ROOT"
 
   python3 - "$ZEEK_ROOT" "$ZEEK_FLAT_ROOT" <<'PY'
@@ -402,6 +420,19 @@ main() {
   run_zeek_docker
   run_rita_docker
 
+  # Update baseline DB and build anomaly candidates (deterministic, small output)
+  python3 "$ROOT_DIR/scripts/baseline_update.py" \
+    --day "$DAY" \
+    --zeek-flat-dir "$ZEEK_FLAT_ROOT" \
+    --db "$BASELINE_DB" || true
+
+  python3 "$ROOT_DIR/scripts/detect_candidates.py" \
+    --day "$DAY" \
+    --db "$BASELINE_DB" \
+    --workdir "$WORKDIR" \
+    --allowlist "${HOMENETSEC_ALLOWLIST:-$ROOT_DIR/assets/allowlist.example.json}" \
+    --out "$CANDIDATES_PATH" || true
+
   {
     echo "Network security daily report ($DAY)"
     echo "Generated: $(date)"
@@ -411,6 +442,22 @@ main() {
     summarize_rita
     echo
     summarize_adguard
+    echo
+    echo "Anomaly candidates (baseline-driven):"
+    if [[ -f "$CANDIDATES_PATH" ]]; then
+      python3 - <<PY
+import json
+p="$CANDIDATES_PATH"
+j=json.load(open(p,'r',encoding='utf-8'))
+print(f"  new_external_destinations: {j['counts']['new_external_destinations']}")
+print(f"  new_domains: {j['counts']['new_domains']}")
+print(f"  new_watch_tuples: {j['counts']['new_watch_tuples']}")
+print(f"  high_fanout_hosts: {j['counts']['high_fanout_hosts']}")
+print(f"  rita_beacons(>=threshold): {j['counts']['rita_beacons']}")
+PY
+    else
+      echo "  (no candidates file)"
+    fi
   } > "$REPORT_PATH"
 
   cleanup_old_pcaps

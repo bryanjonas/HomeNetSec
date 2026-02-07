@@ -26,6 +26,9 @@ mongo-data*/
 *.env
 credentials/
 
+# Python
+__pycache__/
+
 # OS/editor
 .DS_Store
 *.swp

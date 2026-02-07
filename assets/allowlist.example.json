@@ -1,0 +1,20 @@
+{
+  "dst_ips": [
+    "1.1.1.1",
+    "1.0.0.1"
+  ],
+  "rdns_suffixes": [
+    ".compute.amazonaws.com",
+    ".one.one.one.one"
+  ],
+  "domains": [
+  ],
+  "domain_suffixes": [
+    ".apple.com",
+    ".icloud.com",
+    ".google.com",
+    ".gstatic.com",
+    ".cloudflare.com"
+  ],
+  "fanout_min_unique_dsts": 50
+}
