@@ -286,8 +286,50 @@ while :; do
   # This is fast and catches truncated/failed merges.
   if [[ "${VERIFY_MERGE:-1}" == "1" ]]; then
     echo "[homenetsec] verify_merge: start (attempt ${merge_attempt})"
-    in_pkts=$(capinfos -c "${local_paths[@]}" 2>/dev/null | awk '/Number of packets/ {v=$NF; gsub(/[^0-9]/,"",v); sum += (v+0)} END {printf("%d", sum+0)}')
-    out_pkts=$(capinfos -c "$merge_path" 2>/dev/null | awk '/Number of packets/ {v=$NF; gsub(/[^0-9]/,"",v); print v; exit}')
+    in_pkts=$(capinfos -c "${local_paths[@]}" 2>/dev/null | python3 -c 'import re,sys
+
+def parse(s: str) -> int:
+  s=s.strip().replace(","," ")
+  s=re.sub(r"\s+"," ",s)
+  m=re.search(r"Number of packets:\s*([0-9][0-9\s]*)\s*([kKmM]?)", s)
+  if not m:
+    return 0
+  n=int(m.group(1).replace(" ",""))
+  suf=m.group(2).lower()
+  if suf=="k":
+    return n*1000
+  if suf=="m":
+    return n*1000000
+  return n
+
+total=0
+for line in sys.stdin:
+  if "Number of packets" not in line:
+    continue
+  total += parse(line)
+print(total)')
+
+    out_pkts=$(capinfos -c "$merge_path" 2>/dev/null | python3 -c 'import re,sys
+
+def parse(s: str) -> int:
+  s=s.strip().replace(","," ")
+  s=re.sub(r"\s+"," ",s)
+  m=re.search(r"Number of packets:\s*([0-9][0-9\s]*)\s*([kKmM]?)", s)
+  if not m:
+    return 0
+  n=int(m.group(1).replace(" ",""))
+  suf=m.group(2).lower()
+  if suf=="k":
+    return n*1000
+  if suf=="m":
+    return n*1000000
+  return n
+
+for line in sys.stdin:
+  if "Number of packets" in line:
+    print(parse(line))
+    sys.exit(0)
+print(0)')
     if [[ -z "${out_pkts:-}" ]]; then
       if (( merge_attempt <= MERGE_RETRIES )); then
         echo "[homenetsec] WARN: verify_merge could not read merged pcap (attempt ${merge_attempt}); retrying" >&2
