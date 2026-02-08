@@ -22,6 +22,10 @@ output/suricata/
 reports/
 output/reports/
 
+# Runtime state + dashboard output
+output/state/
+output/www/
+
 # Mongo volume data (if stored locally)
 mongo-data*/
 

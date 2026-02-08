@@ -68,11 +68,21 @@ if [[ ! -f "$REPORT_PATH" ]]; then
   exit 2
 fi
 
-# Condense and send to Telegram via Telegram Bot API token from OpenClaw config.
-python3 - "$CONFIG_JSON" "$CHAT_ID" "$REPORT_PATH" <<'PY'
+# Update local dashboard pages (writes to $WORKDIR/www)
+( cd "$ROOT_DIR" && HOMENETSEC_WORKDIR="$WORKDIR" ./scripts/generate_dashboard.sh "$TODAY_ET" ) || \
+  echo "[$(ts)] [homenetsec] WARN: dashboard generation failed"
+
+# If a dashboard base URL is configured, send a link + a short excerpt.
+# Otherwise, fall back to sending the condensed report.
+DASHBOARD_BASE_URL="${HOMENETSEC_DASHBOARD_BASE_URL:-}"
+if [[ -z "$DASHBOARD_BASE_URL" && -n "${HOMENETSEC_TS_BIND_IP:-}" ]]; then
+  DASHBOARD_BASE_URL="http://${HOMENETSEC_TS_BIND_IP}:${HOMENETSEC_DASHBOARD_PORT:-8088}"
+fi
+
+python3 - "$CONFIG_JSON" "$CHAT_ID" "$REPORT_PATH" "$TODAY_ET" "$DASHBOARD_BASE_URL" <<'PY'
 import json, sys, urllib.parse, urllib.request
 
-config_path, chat_id, report_path = sys.argv[1], sys.argv[2], sys.argv[3]
+config_path, chat_id, report_path, today_et, base_url = sys.argv[1:6]
 
 with open(config_path, 'r', encoding='utf-8') as f:
     cfg = json.load(f)
@@ -82,18 +92,22 @@ token = cfg["channels"]["telegram"]["botToken"]
 with open(report_path, 'r', encoding='utf-8', errors='replace') as f:
     lines = [ln.rstrip('\n') for ln in f]
 
-# keep it short
-MAX_LINES = 60
-text = "\n".join(lines[:MAX_LINES])
+MAX_LINES = 35
+excerpt = "\n".join(lines[:MAX_LINES]).strip()
 
-url = f"https://api.telegram.org/bot{token}/sendMessage"
+text = excerpt
+if base_url:
+    url = base_url.rstrip('/') + f"/daily/{today_et}.html"
+    text = f"HomeNetSec daily report: {url}\n\n" + excerpt
+
+api = f"https://api.telegram.org/bot{token}/sendMessage"
 body = urllib.parse.urlencode({
     "chat_id": chat_id,
     "text": text,
     "disable_web_page_preview": "true",
 }).encode("utf-8")
 
-req = urllib.request.Request(url, data=body, method="POST")
+req = urllib.request.Request(api, data=body, method="POST")
 with urllib.request.urlopen(req, timeout=30) as resp:
     resp.read()
 PY

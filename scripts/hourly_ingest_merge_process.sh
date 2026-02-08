@@ -369,3 +369,7 @@ if [[ "${RUN_RETENTION_CLEANUP:-1}" == "1" ]]; then
   find "$WORKDIR/suricata" -type f -name 'eve-merged-*.json' -mtime +"$HOURLY_ARTIFACT_RETENTION_DAYS" -print0 | xargs -0 -r rm -f
 fi
 
+# 7) Update dashboard pages (best-effort)
+( cd "$ROOT_DIR" && HOMENETSEC_WORKDIR="$WORKDIR" ./scripts/generate_dashboard.sh ) || \
+  echo "[homenetsec] WARN: dashboard generation failed"
+

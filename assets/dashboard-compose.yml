@@ -1,0 +1,18 @@
+# HomeNetSec dashboard (static)
+#
+# This service serves files generated under ../output/www (HTML + JSON) via a tiny nginx container.
+#
+# IMPORTANT:
+# - Bind only to LAN + Tailscale IPs (no 0.0.0.0) so it is not exposed publicly.
+# - Provide binds via assets/.env (NOT committed). Commit assets/.env.example instead.
+
+services:
+  homenetsec_dashboard:
+    image: nginx:alpine
+    container_name: homenetsec_dashboard
+    restart: unless-stopped
+    volumes:
+      - ../output/www:/usr/share/nginx/html:ro
+    ports:
+      - "${HOMENETSEC_LAN_BIND_IP:?set in assets/.env}:${HOMENETSEC_DASHBOARD_PORT:-8088}:80"
+      - "${HOMENETSEC_TS_BIND_IP:?set in assets/.env}:${HOMENETSEC_DASHBOARD_PORT:-8088}:80"
