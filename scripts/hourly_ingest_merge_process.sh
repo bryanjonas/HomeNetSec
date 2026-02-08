@@ -60,11 +60,12 @@ high_epoch=0
 pending_json='[]'
 
 if [[ -f "$STATE_JSON" ]]; then
+  export STATE_JSON_PATH="$STATE_JSON"
   read -r last_contig_epoch high_epoch pending_json < <(python3 - <<'PY'
-import json
-p = "$STATE_JSON"
+import json, os
+p = os.environ.get('STATE_JSON_PATH','')
 try:
-  j = json.load(open(p,'r',encoding='utf-8'))
+  j = json.load(open(p,'r',encoding='utf-8')) if p else {}
 except Exception:
   j = {}
 # Back-compat: older state used last_epoch
@@ -141,7 +142,7 @@ sftp_ls() {
     return 1
   fi
   # Filter out sftp prompts/noise; keep only absolute paths.
-  printf '%s\n' "$out" | sed -n 's/^sftp> //p; /^\//p' | sed '/^$/d'
+  printf '%s\n' "$out" | sed -n '/^\//p' | sed '/^$/d'
 }
 
 sftp_ls_long_one() {
@@ -177,8 +178,11 @@ sftp_get() {
 
 epoch_from_basename() {
   # Extract epoch from lan-YYYY-MM-DD_HH-MM-SS.pcap...
+  # IMPORTANT: honor TZ env (America/New_York) so timestamps match the filename convention.
   local bn="$1"
-  python3 -c 'import re,sys,datetime
+  python3 -c 'import re,sys,datetime,time
+if hasattr(time, "tzset"):
+  time.tzset()
 bn=sys.argv[1]
 m=re.match(r"^lan-(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.pcap", bn)
 if not m:
@@ -210,8 +214,15 @@ fi
 # - apply PULL_SKIP_NEWEST_N only to the newest N of the FRESH set (not pending)
 export LAST_CONTIG_EPOCH="$last_contig_epoch" CUTOFF_EPOCH="$cutoff_epoch" HIGH_EPOCH="$high_epoch" PENDING_JSON="$pending_json"
 
-candidates_tsv=$(printf '%s' "$all_files" | python3 - <<'PY'
-import os, re, sys, json, datetime
+# Note: on very large lists, the producer side of a pipe can receive SIGPIPE depending on
+# how bash captures command substitution output. Treat rc=141 as non-fatal here.
+# IMPORTANT: do NOT use `python3 -` with a heredoc when piping data; stdin would be consumed by the script.
+set +o pipefail
+py_candidates=$(cat <<'PY'
+import os, re, sys, json, datetime, time
+# Ensure TZ env is honored for naive datetime.timestamp()
+if hasattr(time, 'tzset'):
+  time.tzset()
 
 last_contig = int(os.environ['LAST_CONTIG_EPOCH'])
 cutoff = int(os.environ['CUTOFF_EPOCH'])
@@ -224,14 +235,12 @@ except Exception:
   pending = []
 
 pending_epochs = set()
-pending_by_epoch = {}
 for it in pending:
   try:
     ep = int(it.get('epoch',0) or 0)
     path = (it.get('path') or '').strip()
     if ep>0 and path:
       pending_epochs.add(ep)
-      pending_by_epoch[ep] = path
   except Exception:
     pass
 
@@ -245,7 +254,8 @@ def to_epoch(path: str):
   dt=datetime.datetime(d.year,d.month,d.day,hh,mm,ss)
   return int(dt.timestamp())
 
-seen = {}
+# Track all paths per epoch (multiple .pcap00x can share the same timestamp)
+seen = []
 max_seen_eligible = high_prev
 for line in sys.stdin:
   p=line.strip()
@@ -254,13 +264,12 @@ for line in sys.stdin:
   ep = to_epoch(p)
   if ep is None:
     continue
-  seen[ep] = p
+  seen.append((ep,p))
   if last_contig < ep <= cutoff and ep > max_seen_eligible:
     max_seen_eligible = ep
 
-# Build candidate list with a pending flag
 out = []
-for ep, p in seen.items():
+for ep, p in seen:
   if ep in pending_epochs and ep <= cutoff:
     out.append((ep, p, 1))
   elif last_contig < ep <= cutoff:
@@ -271,6 +280,9 @@ for ep, p, is_pending in out:
   print(f"{ep}\t{p}\t{is_pending}\t{max_seen_eligible}")
 PY
 )
+
+candidates_tsv=$(printf '%s' "$all_files" | python3 -c "$py_candidates")
+set -o pipefail
 
 if [[ -z "$candidates_tsv" ]]; then
   echo "[homenetsec] No eligible pcaps (last_contig_epoch=$last_contig_epoch cutoff=$cutoff_epoch)."
