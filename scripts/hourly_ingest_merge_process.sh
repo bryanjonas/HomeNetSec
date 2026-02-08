@@ -244,8 +244,10 @@ fi
 # Suricata writes to output/suricata/$merge_day/eve.json (overwrites each run)
 merged_in_container="/pcaps/$merge_day/$merge_name"
 
-echo "[homenetsec] suricata(docker) -> $merge_name"
-compose --profile ja4 run --rm -e DAY="$merge_day" -e PCAP="$merged_in_container" suricata-offline || \
+eve_name="eve-${merge_name%.pcap}.json"
+
+echo "[homenetsec] suricata(docker) -> $merge_name (eve=$eve_name)"
+compose --profile ja4 run --rm -e DAY="$merge_day" -e PCAP="$merged_in_container" -e EVE_NAME="$eve_name" suricata-offline || \
   echo "[homenetsec] WARN: suricata failed for merged pcap; continuing"
 
 echo "[homenetsec] zeek(docker) -> $merge_name"

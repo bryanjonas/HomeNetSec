@@ -75,10 +75,11 @@ services:
        mkdir -p "/out/$${DAY}";
        # Write EVE JSON with TLS fingerprints when available.
        # Note: Suricata config varies by version; we keep defaults and just request eve.json output.
+       EVE_NAME="$${EVE_NAME:-eve.json}";
        suricata -r "$${PCAP}" \
          -l "/out/$${DAY}" \
          --set outputs.1.eve-log.enabled=yes \
-         --set outputs.1.eve-log.filename=eve.json \
+         --set outputs.1.eve-log.filename="$${EVE_NAME}" \
          --set outputs.1.eve-log.types.0.alert.enabled=no \
          --set outputs.1.eve-log.types.1.dns.enabled=no \
          --set outputs.1.eve-log.types.2.http.enabled=no \

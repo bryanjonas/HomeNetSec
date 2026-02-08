@@ -49,7 +49,14 @@ if [[ "${RUN_HOURLY_INGEST_BEFORE_DAILY:-1}" == "1" ]]; then
 fi
 
 # Generate report
-HOMENETSEC_WORKDIR="$WORKDIR" "$PIPELINE" "$TODAY_ET" >/dev/null
+# At 8pm we do NOT re-run Zeek/Suricata over a whole day. Those are handled incrementally
+# by the hourly ingest (merged PCAP) job. Here we run the reporting layer: RITA + baselines +
+# candidates + report.
+HOMENETSEC_WORKDIR="$WORKDIR" \
+  SKIP_PCAP_PULL=1 \
+  SKIP_ZEEK=1 \
+  RUN_JA4=0 \
+  "$PIPELINE" "$TODAY_ET" >/dev/null
 
 if [[ ! -f "$REPORT_PATH" ]]; then
   echo "[$(ts)] [homenetsec] Report missing: $REPORT_PATH"
