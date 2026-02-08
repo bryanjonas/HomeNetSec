@@ -1,6 +1,6 @@
 ---
 name: home-netsec
-description: Run and maintain a home network security daily pipeline (OPNsense PCAP pull, Zeek offline analysis, Zeek log flattening, RITA analysis with MongoDB, AdGuardHome DNS stats) and produce a concise report suitable for sending via OpenClaw messaging. Use for packaging, running, troubleshooting, or refactoring the HomeNetSec workflow.
+description: Run and maintain the HomeNetSec network security pipeline: hourly PCAP ingest (OPNsense SSH pull), merge+verify+delete inputs, Suricata+Zeek on merged PCAPs, plus daily 8pm reporting (RITA + baselines/candidates + AdGuardHome DNS stats) with Telegram delivery. Use for packaging, running, troubleshooting, or refactoring the HomeNetSec workflow.
 ---
 
 # HomeNetSec
@@ -15,7 +15,9 @@ This skill bundles the HomeNetSec daily pipeline.
 
 ## Entry points
 
-- `scripts/run_daily.sh` (to be added): run the full pipeline for a given day.
+- `scripts/hourly_ingest_merge_process.sh` — hourly ingest+processing (download new pcaps since last ingest, merge+verify, delete inputs, run Suricata+Zeek)
+- `scripts/run_daily.sh` — report generator (RITA + baselines/candidates + report; can be run in report-only mode)
+- `scripts/run_and_send_openclaw.sh` — 8pm wrapper (run hourly ingest once, then run `run_daily.sh` report-only and send Telegram)
 
 ## Notes
 
