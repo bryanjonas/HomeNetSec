@@ -118,6 +118,30 @@ pull_pcaps() {
     local vtotal=${#vfiles[@]}
     if (( vtotal > skip_newest_n )); then
       local vupto=$(( vtotal - skip_newest_n ))
+
+      # Copy any missing files (one more attempt), then re-verify.
+      local -a missing_remotes=()
+      for (( i=0; i<vupto; i++ )); do
+        local r="${vfiles[$i]}"
+        [[ -z "$r" ]] && continue
+        local b
+        b=$(basename "$r")
+        if [[ ! -f "$PCAP_DIR/$b" ]]; then
+          missing_remotes+=("$r")
+        fi
+      done
+
+      if (( ${#missing_remotes[@]} > 0 )); then
+        echo "[homenetsec] WARN: PCAP verification found ${#missing_remotes[@]} missing file(s); attempting catch-up copy"
+        local r
+        for r in "${missing_remotes[@]}"; do
+          local b
+          b=$(basename "$r")
+          echo "[homenetsec] pulling(missing) $r"
+          ${scp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST:$r" "$PCAP_DIR/$b" >/dev/null || true
+        done
+      fi
+
       local missing=0
       for (( i=0; i<vupto; i++ )); do
         local r="${vfiles[$i]}"
@@ -125,10 +149,11 @@ pull_pcaps() {
         local b
         b=$(basename "$r")
         if [[ ! -f "$PCAP_DIR/$b" ]]; then
-          echo "[homenetsec] ERROR: missing expected local pcap: $PCAP_DIR/$b" >&2
+          echo "[homenetsec] ERROR: missing expected local pcap after catch-up: $PCAP_DIR/$b" >&2
           missing=1
         fi
       done
+
       if (( missing == 1 )); then
         echo "[homenetsec] ERROR: PCAP verification failed; refusing to continue with processing." >&2
         return 1
