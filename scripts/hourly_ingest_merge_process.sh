@@ -32,6 +32,7 @@ OPNSENSE_PCAP_DIR="${OPNSENSE_PCAP_DIR:-/var/log/pcaps}"
 # Partial protections
 PULL_SKIP_NEWEST_N="${PULL_SKIP_NEWEST_N:-1}"
 SAFETY_LAG_SECONDS="${SAFETY_LAG_SECONDS:-120}"  # don't consider anything newer than now-lag
+REMOTE_STABILITY_SECONDS="${REMOTE_STABILITY_SECONDS:-15}"  # file size+mtime must be stable across this interval
 
 require() {
   command -v "$1" >/dev/null 2>&1 || { echo "[homenetsec] ERROR: missing dependency: $1" >&2; exit 127; }
@@ -40,6 +41,8 @@ require() {
 require docker
 require python3
 require mergecap
+require capinfos
+require tshark
 
 compose() {
   HOMENETSEC_WORKDIR="$WORKDIR" docker compose -f "$ROOT_DIR/assets/docker-compose.yml" "$@"
@@ -87,6 +90,38 @@ PY
 ssh_base=(ssh -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8)
 scp_base=(scp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=20)
 
+remote_stat() {
+  # Prints: "<size> <mtime>" for a remote path, or empty on failure.
+  local remote_path="$1"
+  ${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" "stat -f '%z %m' '$remote_path'" 2>/dev/null || true
+}
+
+remote_is_stable() {
+  # Checks remote file size+mtime stability across REMOTE_STABILITY_SECONDS.
+  # Returns 0 if stable, 1 if changing/unstat-able.
+  local remote_path="$1"
+  local a b
+  a=$(remote_stat "$remote_path")
+  [[ -z "$a" ]] && return 1
+  sleep "$REMOTE_STABILITY_SECONDS"
+  b=$(remote_stat "$remote_path")
+  [[ -z "$b" ]] && return 1
+  [[ "$a" == "$b" ]]
+}
+
+epoch_from_basename() {
+  # Extract epoch from lan-YYYY-MM-DD_HH-MM-SS.pcap...
+  local bn="$1"
+  python3 -c 'import re,sys,datetime
+bn=sys.argv[1]
+m=re.match(r"^lan-(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.pcap", bn)
+if not m:
+  print(0); sys.exit(0)
+d=datetime.date.fromisoformat(m.group(1))
+dt=datetime.datetime(d.year,d.month,d.day,int(m.group(2)),int(m.group(3)),int(m.group(4)))
+print(int(dt.timestamp()))' "$bn"
+}
+
 # 1) Build remote list
 all_files=""
 while IFS= read -r day; do
@@ -106,13 +141,12 @@ fi
 
 export LAST_EPOCH="$last_epoch" CUTOFF_EPOCH="$cutoff_epoch"
 
-filtered=$(printf '%s' "$all_files" | python3 - <<'PY'
-import os, re, sys, datetime
-last=int(os.environ['LAST_EPOCH'])
-cutoff=int(os.environ['CUTOFF_EPOCH'])
+filtered=$(printf '%s' "$all_files" | python3 -c 'import os, re, sys, datetime
+last=int(os.environ["LAST_EPOCH"])
+cutoff=int(os.environ["CUTOFF_EPOCH"])
 
 def to_epoch(path: str):
-  bn=path.strip().split('/')[-1]
+  bn=path.strip().split("/")[-1]
   m=re.match(r"^lan-(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.pcap", bn)
   if not m:
     return None
@@ -129,15 +163,13 @@ for line in sys.stdin:
   ep=to_epoch(p)
   if ep is None:
     continue
-  # strictly greater than last_epoch to avoid reprocessing
   if last < ep <= cutoff:
     out.append((ep,p))
 
 out.sort()
 for _,p in out:
   print(p)
-PY
-)
+')
 
 if [[ -z "$filtered" ]]; then
   echo "[homenetsec] No new pcaps since last_epoch=$last_epoch (cutoff=$cutoff_epoch)."
@@ -155,7 +187,14 @@ fi
 upto=$(( ${#new_files[@]} - PULL_SKIP_NEWEST_N ))
 
 # 2) Download missing and track local paths for merge
+# Strategy:
+# - Only copy remote files that appear stable (size+mtime unchanged across REMOTE_STABILITY_SECONDS)
+# - Copy to a .partial file
+# - Validate by rewriting via tshark to the final path
+# - Skip/quarantine any pcap that fails validation; continue with the rest
 local_paths=()
+max_epoch=0
+
 for (( i=0; i<upto; i++ )); do
   remote="${new_files[$i]}"
   base=$(basename "$remote")
@@ -163,15 +202,50 @@ for (( i=0; i<upto; i++ )); do
   out_dir="$WORKDIR/pcaps/$day"
   mkdir -p "$out_dir"
   out_path="$out_dir/$base"
-  if [[ ! -f "$out_path" ]]; then
-    echo "[homenetsec] pulling $remote"
-    ${scp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST:$remote" "$out_path" >/dev/null
+
+  # If we already have a validated local copy, include it.
+  if [[ -f "$out_path" ]]; then
+    local_paths+=("$out_path")
+    ep=$(epoch_from_basename "$base")
+    (( ep > max_epoch )) && max_epoch=$ep
+    continue
   fi
-  local_paths+=("$out_path")
+
+  # Remote stability check to avoid copying actively-written segments.
+  if ! remote_is_stable "$remote"; then
+    echo "[homenetsec] skip(unstable): $remote"
+    continue
+  fi
+
+  tmp_path="$out_path.partial"
+  rm -f -- "$tmp_path" 2>/dev/null || true
+
+  echo "[homenetsec] pulling $remote"
+  ${scp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST:$remote" "$tmp_path" >/dev/null || {
+    echo "[homenetsec] WARN: scp failed for $remote" >&2
+    rm -f -- "$tmp_path" 2>/dev/null || true
+    continue
+  }
+
+  # Validate/normalize by rewriting via tshark.
+  # If tshark can read and write, the file is parseable end-to-end.
+  if tshark -r "$tmp_path" -w "$out_path" >/dev/null 2>&1; then
+    rm -f -- "$tmp_path" 2>/dev/null || true
+    local_paths+=("$out_path")
+    ep=$(epoch_from_basename "$base")
+    (( ep > max_epoch )) && max_epoch=$ep
+  else
+    bad_path="$out_path.bad.$(date +%s)"
+    mv -f -- "$tmp_path" "$bad_path" 2>/dev/null || true
+    rm -f -- "$out_path" 2>/dev/null || true
+    echo "[homenetsec] WARN: invalid pcap (quarantined): $bad_path" >&2
+    continue
+  fi
+
 done
 
 if (( ${#local_paths[@]} == 0 )); then
-  echo "[homenetsec] Nothing downloaded (all new files already present locally)."
+  echo "[homenetsec] No validated pcaps to merge (after stability+validation filters)."
   exit 0
 fi
 
@@ -259,19 +333,8 @@ echo "[homenetsec] zeek(docker) -> $merge_name"
 compose --profile zeek run --rm -e PCAP="$merged_in_container" zeek-offline || \
   echo "[homenetsec] WARN: zeek failed for merged pcap; continuing"
 
-# 5) Update state: advance last_epoch to the newest processed file timestamp
-new_last=$(python3 - <<PY
-import re, datetime
-bn="$last_bn"
-m=re.match(r"^lan-(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.pcap", bn)
-if not m:
-  print($cutoff_epoch)
-else:
-  d=datetime.date.fromisoformat(m.group(1))
-  dt=datetime.datetime(d.year,d.month,d.day,int(m.group(2)),int(m.group(3)),int(m.group(4)))
-  print(int(dt.timestamp()))
-PY
-)
+# 5) Update state: advance last_epoch to the newest validated file timestamp we actually processed
+new_last="$max_epoch"
 
 python3 - <<PY
 import json, time
@@ -281,7 +344,7 @@ j={
   "updated_at": time.strftime('%Y-%m-%dT%H:%M:%S%z'),
   "last_merge": "$merge_name",
   "merge_day": "$merge_day",
-  "downloaded_count": int(${#local_paths[@]}),
+  "validated_count": int(${#local_paths[@]}),
 }
 json.dump(j, open(p,'w',encoding='utf-8'), indent=2)
 print(p)
