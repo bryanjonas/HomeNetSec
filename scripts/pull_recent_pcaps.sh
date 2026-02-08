@@ -31,8 +31,23 @@ OPNSENSE_PCAP_DIR="${OPNSENSE_PCAP_DIR:-/var/log/pcaps}"
 # For frequent pulls, skipping just the newest 1 is usually sufficient.
 SKIP_NEWEST_N="${PULL_SKIP_NEWEST_N:-1}"
 
-ssh_base=(ssh -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8)
-scp_base=(scp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=12)
+# Use SFTP to support non-interactive SSH accounts on OPNsense.
+sftp_base=(sftp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=12)
+
+sftp_ls() {
+  local remote_glob="$1"
+  local out
+  if ! out=$(printf 'ls -1 %s\n' "$remote_glob" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" 2>/dev/null); then
+    return 1
+  fi
+  printf '%s\n' "$out" | sed -n 's/^sftp> //p; /^\//p' | sed '/^$/d'
+}
+
+sftp_get() {
+  local remote_path="$1"
+  local local_path="$2"
+  printf 'get %s %s\n' "$remote_path" "$local_path" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" >/dev/null
+}
 
 now_epoch=$(date +%s)
 start_epoch=$(date -d "$HOURS hours ago" +%s)
@@ -58,11 +73,9 @@ PY
 all_files=""
 while IFS= read -r day; do
   [[ -z "$day" ]] && continue
-  # Use remote shell expansion for the day prefix.
-  # If it fails (SSH/auth/perms), fail fast.
-  if ! part=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
-      "ls -1 $OPNSENSE_PCAP_DIR/lan-${day}_*.pcap* 2>/dev/null | sort" ); then
-    echo "[homenetsec] ERROR: SSH list failed for day=$day ($OPNSENSE_USER@$OPNSENSE_HOST:$OPNSENSE_PCAP_DIR)" >&2
+  # Use SFTP for listing (supports globs). Fail fast on auth/network errors.
+  if ! part=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${day}_*.pcap*" | sort); then
+    echo "[homenetsec] ERROR: SFTP list failed for day=$day ($OPNSENSE_USER@$OPNSENSE_HOST:$OPNSENSE_PCAP_DIR)" >&2
     exit 1
   fi
   if [[ -n "$part" ]]; then
@@ -147,7 +160,7 @@ for (( i=0; i<upto; i++ )); do
 
   if [[ ! -f "$out_dir/$base" ]]; then
     echo "[homenetsec] pulling $remote"
-    ${scp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST:$remote" "$out_dir/$base" >/dev/null
+    sftp_get "$remote" "$out_dir/$base" >/dev/null
   fi
 done
 

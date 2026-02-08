@@ -63,16 +63,29 @@ pull_pcaps() {
   local skip_newest_n="${PULL_SKIP_NEWEST_N:-2}"
 
   local list
-  local -a ssh_base scp_base
-  ssh_base=(ssh -i "$OPNSENSE_KEY" -o BatchMode=yes -o ConnectTimeout=8)
-  scp_base=(scp -i "$OPNSENSE_KEY" -o BatchMode=yes -o ConnectTimeout=8)
+  local -a sftp_base
+  sftp_base=(sftp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=12)
+
+  sftp_ls() {
+    local remote_glob="$1"
+    local out
+    if ! out=$(printf 'ls -1 %s\n' "$remote_glob" | "${sftp_base[@]}" "$OPNSENSE_USER@$OPNSENSE_HOST" 2>/dev/null); then
+      return 1
+    fi
+    printf '%s\n' "$out" | sed -n 's/^sftp> //p; /^\//p' | sed '/^$/d'
+  }
+
+  sftp_get() {
+    local remote_path="$1"
+    local local_path="$2"
+    printf 'get %s %s\n' "$remote_path" "$local_path" | "${sftp_base[@]}" "$OPNSENSE_USER@$OPNSENSE_HOST" >/dev/null
+  }
 
   # Filenames embed timestamps, so lexicographic sort corresponds to time order.
-  # IMPORTANT: if SSH cannot list pcaps (auth/network/permissions), fail fast.
-  if ! list=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
-    "ls -1 $OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap* 2>/dev/null | sort"); then
-    echo "[homenetsec] ERROR: PCAP pull failed (SSH to $OPNSENSE_USER@$OPNSENSE_HOST could not list $OPNSENSE_PCAP_DIR)."
-    echo "[homenetsec]        Fix SSH/auth/permissions or set SKIP_PCAP_PULL=1 if you are using local pcaps."
+  # IMPORTANT: if listing fails (auth/network/permissions), fail fast.
+  if ! list=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap*" | sort); then
+    echo "[homenetsec] ERROR: PCAP pull failed (SFTP to $OPNSENSE_USER@$OPNSENSE_HOST could not list $OPNSENSE_PCAP_DIR)."
+    echo "[homenetsec]        Fix SSH/SFTP auth/permissions or set SKIP_PCAP_PULL=1 if you are using local pcaps."
     return 1
   fi
 
@@ -98,7 +111,7 @@ pull_pcaps() {
     base=$(basename "$remote")
     if [[ ! -f "$PCAP_DIR/$base" ]]; then
       echo "[homenetsec] pulling $remote"
-      ${scp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST:$remote" "$PCAP_DIR/$base" >/dev/null
+      sftp_get "$remote" "$PCAP_DIR/$base" >/dev/null
     fi
   done
 
@@ -108,9 +121,8 @@ pull_pcaps() {
   # Default on; can be disabled for ad-hoc runs.
   if [[ "${VERIFY_PCAP_PULL:-1}" == "1" ]]; then
     local verify_list
-    if ! verify_list=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
-      "ls -1 $OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap* 2>/dev/null | sort"); then
-      echo "[homenetsec] ERROR: PCAP verify failed (SSH list failed)." >&2
+    if ! verify_list=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap*" | sort); then
+      echo "[homenetsec] ERROR: PCAP verify failed (SFTP list failed)." >&2
       return 1
     fi
 

@@ -76,7 +76,7 @@ Expected path:
 
 - `$HOMENETSEC_WORKDIR/pcaps/YYYY-MM-DD/lan-YYYY-MM-DD_*.pcap*`
 
-The default `run_daily.sh` includes a pull step tailored to my environment (SSH copy from a firewall). If you don’t have that, you can:
+The default `run_daily.sh` includes a pull step tailored to my environment (SFTP pull from an OPNsense host; supports non-interactive SSH accounts without shell access). If you don’t have that, you can:
 
 - disable/replace the pull step, and
 - just drop your PCAPs into the folder above.
@@ -99,6 +99,8 @@ This is used only for summary stats in the report (e.g., top clients, top blocke
 - `HOMENETSEC_WORKDIR` — where PCAPs/logs/reports live (default: `./output`)
 
 ### OPNsense PCAP ingest (environment-specific)
+
+HomeNetSec pulls PCAPs using **SFTP** (not remote shell commands), which allows use of locked-down SSH accounts (no interactive shell).
 
 - `OPNSENSE_HOST`
 - `OPNSENSE_USER`

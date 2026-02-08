@@ -82,26 +82,51 @@ if [[ "$end_day" != "$start_day" ]]; then
   days+="$end_day"$'\n'
 fi
 
-ssh_base=(ssh -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8)
-scp_base=(scp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=20)
+# NOTE: OPNsense often runs a non-interactive SSH account for PCAP pulls.
+# To support that, we use SFTP (no remote shell commands).
+sftp_base=(sftp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=12)
 
-remote_stat() {
-  # Prints: "<size> <mtime>" for a remote path, or empty on failure.
+sftp_ls() {
+  # Lists remote paths (supports globs) one-per-line.
+  # Returns 0 even if no matches; returns nonzero on auth/network errors.
+  local remote_glob="$1"
+  local out
+  if ! out=$(printf 'ls -1 %s\n' "$remote_glob" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" 2>/dev/null); then
+    return 1
+  fi
+  # Filter out sftp prompts/noise; keep only absolute paths.
+  printf '%s\n' "$out" | sed -n 's/^sftp> //p; /^\//p' | sed '/^$/d'
+}
+
+sftp_ls_long_one() {
+  # Best-effort long listing for a single remote file.
+  # We just compare the resulting line text for stability.
   local remote_path="$1"
-  ${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" "stat -f '%z %m' '$remote_path'" 2>/dev/null || true
+  local out
+  if ! out=$(printf 'ls -l %s\n' "$remote_path" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" 2>/dev/null); then
+    return 1
+  fi
+  # Return the first line that looks like a permission string.
+  printf '%s\n' "$out" | sed -n '/^-[rwx-]/p' | head -n 1
 }
 
 remote_is_stable() {
-  # Checks remote file size+mtime stability across REMOTE_STABILITY_SECONDS.
-  # Returns 0 if stable, 1 if changing/unstat-able.
+  # Checks remote file stability across REMOTE_STABILITY_SECONDS.
+  # Because we can't run remote stat(1), we compare the `sftp ls -l` output line.
   local remote_path="$1"
   local a b
-  a=$(remote_stat "$remote_path")
+  a=$(sftp_ls_long_one "$remote_path" || true)
   [[ -z "$a" ]] && return 1
   sleep "$REMOTE_STABILITY_SECONDS"
-  b=$(remote_stat "$remote_path")
+  b=$(sftp_ls_long_one "$remote_path" || true)
   [[ -z "$b" ]] && return 1
   [[ "$a" == "$b" ]]
+}
+
+sftp_get() {
+  local remote_path="$1"
+  local local_path="$2"
+  printf 'get %s %s\n' "$remote_path" "$local_path" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" >/dev/null
 }
 
 epoch_from_basename() {
@@ -128,9 +153,8 @@ for day in "$start_day" "$end_day"; do
     continue
   fi
 
-  if ! part=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
-      "ls -1 $OPNSENSE_PCAP_DIR/lan-${day}_*.pcap* 2>/dev/null | sort"); then
-    echo "[homenetsec] ERROR: SSH list failed for day=$day ($OPNSENSE_USER@$OPNSENSE_HOST:$OPNSENSE_PCAP_DIR)" >&2
+  if ! part=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${day}_*.pcap*" | sort); then
+    echo "[homenetsec] ERROR: SFTP list failed for day=$day ($OPNSENSE_USER@$OPNSENSE_HOST:$OPNSENSE_PCAP_DIR)" >&2
     exit 1
   fi
   [[ -n "$part" ]] && all_files+="$part"$'\n'
@@ -223,11 +247,11 @@ for (( i=0; i<upto; i++ )); do
   rm -f -- "$tmp_path" 2>/dev/null || true
 
   echo "[homenetsec] pulling $remote"
-  ${scp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST:$remote" "$tmp_path" >/dev/null || {
-    echo "[homenetsec] WARN: scp failed for $remote" >&2
+  if ! sftp_get "$remote" "$tmp_path"; then
+    echo "[homenetsec] WARN: sftp get failed for $remote" >&2
     rm -f -- "$tmp_path" 2>/dev/null || true
     continue
-  }
+  fi
 
   # Validate/normalize by rewriting via tshark.
   # If tshark can read and write, the file is parseable end-to-end.
