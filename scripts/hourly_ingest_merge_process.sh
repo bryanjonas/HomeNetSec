@@ -76,14 +76,11 @@ start_day=$(date -d "@$last_epoch" +%F)
 end_day=$(date -d "@$now_epoch" +%F)
 
 # day list (handle midnight boundary)
-# Build in bash to avoid any heredoc/stdin quirks under cron.
-days=""
-d="$start_day"
-while :; do
-  days+="$d"$'\n'
-  [[ "$d" == "$end_day" ]] && break
-  d=$(date -d "$d + 1 day" +%F)
-done
+# Keep it simple: we only need to bridge at most into "today" for midnight rollover.
+days="$start_day"$'\n'
+if [[ "$end_day" != "$start_day" ]]; then
+  days+="$end_day"$'\n'
+fi
 
 ssh_base=(ssh -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8)
 scp_base=(scp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=20)
