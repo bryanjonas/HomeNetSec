@@ -119,15 +119,22 @@ print(int(dt.timestamp()))' "$bn"
 
 # 1) Build remote list
 all_files=""
-while IFS= read -r day; do
+for day in "$start_day" "$end_day"; do
   [[ -z "$day" ]] && continue
+  # avoid duplicate listing if start_day == end_day
+  if [[ "$day" == "$start_day" && "$start_day" == "$end_day" ]]; then
+    :
+  elif [[ "$day" == "$end_day" && "$start_day" == "$end_day" ]]; then
+    continue
+  fi
+
   if ! part=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
       "ls -1 $OPNSENSE_PCAP_DIR/lan-${day}_*.pcap* 2>/dev/null | sort"); then
     echo "[homenetsec] ERROR: SSH list failed for day=$day ($OPNSENSE_USER@$OPNSENSE_HOST:$OPNSENSE_PCAP_DIR)" >&2
     exit 1
   fi
   [[ -n "$part" ]] && all_files+="$part"$'\n'
-done <<< "$days"
+done
 
 if [[ -z "$all_files" ]]; then
   echo "[homenetsec] No remote pcaps found (days=$start_day..$end_day)."
