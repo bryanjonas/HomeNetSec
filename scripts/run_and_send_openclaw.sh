@@ -9,7 +9,7 @@ WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
 PIPELINE="$ROOT_DIR/scripts/run_daily.sh"
 
 CONFIG_JSON="${OPENCLAW_CONFIG_JSON:-$HOME/.openclaw/openclaw.json}"
-CHAT_ID="${OPENCLAW_TELEGRAM_CHAT_ID:-<TELEGRAM_CHAT_ID>}"
+CHAT_ID="${OPENCLAW_TELEGRAM_CHAT_ID:-}"
 LOG_PATH="${HOMENETSEC_LOG_PATH:-$WORKDIR/cron.log}"
 LOCK_PATH="${HOMENETSEC_LOCK_PATH:-$WORKDIR/run_and_send_daily.lock}"
 
@@ -46,6 +46,11 @@ if [[ "${RUN_HOURLY_INGEST_BEFORE_DAILY:-1}" == "1" ]]; then
     ./scripts/hourly_ingest_merge_process.sh ) || \
     echo "[$(ts)] [homenetsec] WARN: hourly_ingest failed; continuing with daily pipeline"
   echo "[$(ts)] [homenetsec] hourly_ingest: end"
+fi
+
+if [[ -z "$CHAT_ID" ]]; then
+  echo "[$(ts)] [homenetsec] ERROR: OPENCLAW_TELEGRAM_CHAT_ID is not set"
+  exit 3
 fi
 
 # Generate report
