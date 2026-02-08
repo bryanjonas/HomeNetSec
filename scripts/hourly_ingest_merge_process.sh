@@ -71,7 +71,9 @@ if (( last_epoch <= 0 )); then
 fi
 
 start_day=$(date -d "@$last_epoch" +%F)
-end_day=$(date -d "@$cutoff_epoch" +%F)
+# IMPORTANT: include "today" in the listing window even if cutoff_epoch is still yesterday.
+# We still filter candidates by cutoff_epoch later; this just ensures day-rollover doesn't stall ingest.
+end_day=$(date -d "@$now_epoch" +%F)
 
 # day list (handle midnight boundary)
 days=$(python3 - <<PY
