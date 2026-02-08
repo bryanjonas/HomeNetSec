@@ -580,11 +580,23 @@ main() {
     python3 "$ROOT_DIR/scripts/ja4db_import.py" --db "$BASELINE_DB" --ja4db "$JA4DB_PATH" || true
   fi
 
+  # Allowlist policy:
+  # - User-managed allowlist should live OUTSIDE the repo (under $WORKDIR/state) and is not committed.
+  # - You can still override explicitly via HOMENETSEC_ALLOWLIST.
+  ALLOWLIST_PATH="${HOMENETSEC_ALLOWLIST:-}"
+  if [[ -z "$ALLOWLIST_PATH" ]]; then
+    if [[ -f "$STATE_DIR/allowlist.local.json" ]]; then
+      ALLOWLIST_PATH="$STATE_DIR/allowlist.local.json"
+    else
+      ALLOWLIST_PATH="$ROOT_DIR/assets/allowlist.example.json"
+    fi
+  fi
+
   python3 "$ROOT_DIR/scripts/detect_candidates.py" \
     --day "$DAY" \
     --db "$BASELINE_DB" \
     --workdir "$WORKDIR" \
-    --allowlist "${HOMENETSEC_ALLOWLIST:-$ROOT_DIR/assets/allowlist.example.json}" \
+    --allowlist "$ALLOWLIST_PATH" \
     --out "$CANDIDATES_PATH" || true
 
   {
