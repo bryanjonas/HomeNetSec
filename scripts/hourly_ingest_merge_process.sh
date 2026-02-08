@@ -91,15 +91,19 @@ fi
 start_day=$(date -d "@$last_contig_epoch" +%F)
 end_day=$(date -d "@$now_epoch" +%F)
 
+export START_DAY="$start_day" END_DAY="$end_day" PENDING_JSON_RAW="$pending_json"
+
 days_list=$(python3 - <<'PY'
-import datetime as dt, json
-sd = dt.date.fromisoformat("$start_day")
-ed = dt.date.fromisoformat("$end_day")
+import datetime as dt, json, os
+sd = dt.date.fromisoformat(os.environ['START_DAY'])
+ed = dt.date.fromisoformat(os.environ['END_DAY'])
+
 pending = []
 try:
-  pending = json.loads("""$pending_json""")
+  pending = json.loads(os.environ.get('PENDING_JSON_RAW','[]') or '[]')
 except Exception:
   pending = []
+
 extra_days = set()
 for it in pending:
   try:
@@ -117,8 +121,7 @@ while d <= ed:
 
 # Add pending days (if any), then dedupe + sort
 for x in sorted(extra_days):
-  if x not in days:
-    days.append(x)
+  days.append(x)
 
 print("\n".join(sorted(set(days))))
 PY
