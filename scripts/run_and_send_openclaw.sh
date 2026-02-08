@@ -97,8 +97,8 @@ excerpt = "\n".join(lines[:MAX_LINES]).strip()
 
 text = excerpt
 if base_url:
-    url = base_url.rstrip('/') + f"/daily/{today_et}.html"
-    text = f"HomeNetSec daily report: {url}\n\n" + excerpt
+    url = base_url.rstrip('/') + "/"
+    text = f"HomeNetSec dashboard (updated): {url}\n\n" + excerpt
 
 api = f"https://api.telegram.org/bot{token}/sendMessage"
 body = urllib.parse.urlencode({
