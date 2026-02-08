@@ -286,8 +286,8 @@ while :; do
   # This is fast and catches truncated/failed merges.
   if [[ "${VERIFY_MERGE:-1}" == "1" ]]; then
     echo "[homenetsec] verify_merge: start (attempt ${merge_attempt})"
-    in_pkts=$(capinfos -c "${local_paths[@]}" 2>/dev/null | awk '/Number of packets/ {sum += $NF} END {printf("%d", sum+0)}')
-    out_pkts=$(capinfos -c "$merge_path" 2>/dev/null | awk '/Number of packets/ {print $NF; exit}')
+    in_pkts=$(capinfos -c "${local_paths[@]}" 2>/dev/null | awk '/Number of packets/ {v=$NF; gsub(/[^0-9]/,"",v); sum += (v+0)} END {printf("%d", sum+0)}')
+    out_pkts=$(capinfos -c "$merge_path" 2>/dev/null | awk '/Number of packets/ {v=$NF; gsub(/[^0-9]/,"",v); print v; exit}')
     if [[ -z "${out_pkts:-}" ]]; then
       if (( merge_attempt <= MERGE_RETRIES )); then
         echo "[homenetsec] WARN: verify_merge could not read merged pcap (attempt ${merge_attempt}); retrying" >&2
