@@ -72,8 +72,17 @@ done <<< "$remote_list"
 
 # Filter down to just the files whose embedded timestamp lies in [start, now].
 export START_EPOCH="$start_epoch" END_EPOCH="$now_epoch"
-filtered=$(printf '%s' "$all_files" | python3 - <<'PY'
-import os, re, sys, datetime
+
+# Note: on very large file lists, the producer side of a pipe (printf) can
+# occasionally receive SIGPIPE depending on how the shell captures command
+# substitution output, which surfaces as exit code 141 under `set -o pipefail`.
+# Treat that as non-fatal here (the Python filter is the authoritative step).
+set +o pipefail
+py_filter=$(cat <<'PY'
+import os, re, sys, datetime, time
+# Ensure TZ env is honored for naive datetime.timestamp()
+if hasattr(time, 'tzset'):
+  time.tzset()
 start=int(os.environ['START_EPOCH'])
 end=int(os.environ['END_EPOCH'])
 
@@ -103,6 +112,14 @@ for _,p in out:
   print(p)
 PY
 )
+filtered=$(printf '%s' "$all_files" | python3 -c "$py_filter")
+filter_rc=$?
+set -o pipefail
+
+if (( filter_rc != 0 )); then
+  echo "[homenetsec] ERROR: timestamp filter failed (rc=$filter_rc)" >&2
+  exit 1
+fi
 
 if [[ -z "$filtered" ]]; then
   echo "[homenetsec] No pcaps found in last ${HOURS}h window (${start_day}..${end_day})."
