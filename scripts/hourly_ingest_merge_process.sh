@@ -185,6 +185,30 @@ merge_path="$merge_dir/$merge_name"
 echo "[homenetsec] mergecap -> $merge_path (${#local_paths[@]} pcaps)"
 mergecap -w "$merge_path" "${local_paths[@]}"
 
+# Verify merge (packet counts): merged packet count should equal the sum of inputs.
+# This is fast and catches truncated/failed merges.
+if [[ "${VERIFY_MERGE:-1}" == "1" ]]; then
+  echo "[homenetsec] verify_merge: start"
+  in_pkts=$(capinfos -c "${local_paths[@]}" 2>/dev/null | awk '/Number of packets/ {sum += $NF} END {printf("%d", sum+0)}')
+  out_pkts=$(capinfos -c "$merge_path" 2>/dev/null | awk '/Number of packets/ {print $NF; exit}')
+  if [[ -z "${out_pkts:-}" ]]; then
+    echo "[homenetsec] ERROR: verify_merge failed to read merged pcap via capinfos" >&2
+    exit 1
+  fi
+  if (( in_pkts != out_pkts )); then
+    echo "[homenetsec] ERROR: verify_merge packet mismatch: inputs=$in_pkts merged=$out_pkts" >&2
+    echo "[homenetsec]        refusing to delete source pcaps" >&2
+    exit 1
+  fi
+  echo "[homenetsec] verify_merge: ok (packets=$out_pkts)"
+fi
+
+# Optionally delete the source PCAPs that were merged (safe only after verify_merge).
+if [[ "${DELETE_MERGED_INPUTS:-1}" == "1" ]]; then
+  echo "[homenetsec] delete_inputs: removing ${#local_paths[@]} source pcap(s) after successful merge"
+  rm -f -- "${local_paths[@]}"
+fi
+
 # 4) Run Suricata + Zeek on the merged pcap
 # Suricata writes to output/suricata/$merge_day/eve.json (overwrites each run)
 merged_in_container="/pcaps/$merge_day/$merge_name"
