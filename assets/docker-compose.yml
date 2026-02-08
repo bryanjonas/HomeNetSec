@@ -66,16 +66,16 @@ services:
       - ${HOMENETSEC_WORKDIR:-./output}/pcaps:/pcaps:ro
       - ${HOMENETSEC_WORKDIR:-./output}/suricata:/out
     # Env vars:
-    # - DAY: YYYY-MM-DD
-    # - PCAP_GLOB: optional glob under /pcaps/$DAY (default: *.pcap*)
+    # - DAY: YYYY-MM-DD (used only to place output under /out/$DAY)
+    # - PCAP: absolute path to a single pcap under /pcaps (required)
     command: >
       'set -euo pipefail;
        : "$${DAY:?DAY env var required}";
-       PCAP_GLOB="$${PCAP_GLOB:-*.pcap*}";
+       : "$${PCAP:?PCAP env var required (e.g. /pcaps/YYYY-MM-DD/file.pcap)}";
        mkdir -p "/out/$${DAY}";
        # Write EVE JSON with TLS fingerprints when available.
        # Note: Suricata config varies by version; we keep defaults and just request eve.json output.
-       suricata -r "/pcaps/$${DAY}/$${PCAP_GLOB}" \
+       suricata -r "$${PCAP}" \
          -l "/out/$${DAY}" \
          --set outputs.1.eve-log.enabled=yes \
          --set outputs.1.eve-log.filename=eve.json \

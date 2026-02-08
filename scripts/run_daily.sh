@@ -287,7 +287,26 @@ run_suricata_ja4() {
   mkdir -p "$WORKDIR/suricata/$DAY"
 
   echo "[homenetsec] suricata(docker) ja4 extraction for $DAY"
-  compose --profile ja4 run --rm -e DAY="$DAY" suricata-offline || {
+
+  # Prefer a single merged pcap if present (created by hourly ingest), else use the newest local pcap.
+  local pcap_path=""
+  shopt -s nullglob
+  local merged=("$PCAP_DIR"/merged-*.pcap)
+  if (( ${#merged[@]} > 0 )); then
+    pcap_path="/pcaps/$DAY/$(basename "${merged[-1]}")"
+  else
+    local pcaps=("$PCAP_DIR"/*.pcap*)
+    if (( ${#pcaps[@]} > 0 )); then
+      pcap_path="/pcaps/$DAY/$(basename "${pcaps[-1]}")"
+    fi
+  fi
+
+  if [[ -z "$pcap_path" ]]; then
+    echo "[homenetsec] No pcaps found for JA4 extraction at $PCAP_DIR"
+    return 0
+  fi
+
+  compose --profile ja4 run --rm -e DAY="$DAY" -e PCAP="$pcap_path" suricata-offline || {
     echo "[homenetsec] WARN: suricata run failed; continuing";
     return 0;
   }
