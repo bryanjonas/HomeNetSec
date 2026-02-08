@@ -103,6 +103,38 @@ pull_pcaps() {
   done
 
   echo "[homenetsec] pull complete (skipped newest $skip_newest_n file(s) to avoid partial copies)"
+
+  # Verification pass: ensure we didn't miss any expected files before continuing.
+  # Default on; can be disabled for ad-hoc runs.
+  if [[ "${VERIFY_PCAP_PULL:-1}" == "1" ]]; then
+    local verify_list
+    if ! verify_list=$(${ssh_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" \
+      "ls -1 $OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap* 2>/dev/null | sort"); then
+      echo "[homenetsec] ERROR: PCAP verify failed (SSH list failed)." >&2
+      return 1
+    fi
+
+    mapfile -t vfiles <<< "$verify_list"
+    local vtotal=${#vfiles[@]}
+    if (( vtotal > skip_newest_n )); then
+      local vupto=$(( vtotal - skip_newest_n ))
+      local missing=0
+      for (( i=0; i<vupto; i++ )); do
+        local r="${vfiles[$i]}"
+        [[ -z "$r" ]] && continue
+        local b
+        b=$(basename "$r")
+        if [[ ! -f "$PCAP_DIR/$b" ]]; then
+          echo "[homenetsec] ERROR: missing expected local pcap: $PCAP_DIR/$b" >&2
+          missing=1
+        fi
+      done
+      if (( missing == 1 )); then
+        echo "[homenetsec] ERROR: PCAP verification failed; refusing to continue with processing." >&2
+        return 1
+      fi
+    fi
+  fi
 }
 
 run_zeek_docker() {
