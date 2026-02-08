@@ -76,18 +76,14 @@ start_day=$(date -d "@$last_epoch" +%F)
 end_day=$(date -d "@$now_epoch" +%F)
 
 # day list (handle midnight boundary)
-days=$(python3 - <<PY
-import datetime
-sd=datetime.date.fromisoformat("$start_day")
-ed=datetime.date.fromisoformat("$end_day")
-d=sd
-out=[]
-while d<=ed:
-  out.append(d.isoformat())
-  d += datetime.timedelta(days=1)
-print("\n".join(out))
-PY
-)
+# Build in bash to avoid any heredoc/stdin quirks under cron.
+days=""
+d="$start_day"
+while :; do
+  days+="$d"$'\n'
+  [[ "$d" == "$end_day" ]] && break
+  d=$(date -d "$d + 1 day" +%F)
+done
 
 ssh_base=(ssh -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=8)
 scp_base=(scp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=20)
