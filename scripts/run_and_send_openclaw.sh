@@ -34,6 +34,20 @@ fi
 TODAY_ET="$(TZ=America/New_York date +%F)"
 REPORT_PATH="$WORKDIR/reports/${TODAY_ET}.txt"
 
+# Hourly-style ingest/catch-up before daily run (download new pcaps since last ingest,
+# merge them, run Suricata+Zeek on the merged pcap). This keeps the local cache warm and
+# reduces per-PCAP container churn.
+if [[ "${RUN_HOURLY_INGEST_BEFORE_DAILY:-1}" == "1" ]]; then
+  echo "[$(ts)] [homenetsec] hourly_ingest: start"
+  ( cd "$ROOT_DIR" && \
+    HOMENETSEC_WORKDIR="$WORKDIR" \
+    PULL_SKIP_NEWEST_N="${PULL_SKIP_NEWEST_N:-1}" \
+    SAFETY_LAG_SECONDS="${SAFETY_LAG_SECONDS:-120}" \
+    ./scripts/hourly_ingest_merge_process.sh ) || \
+    echo "[$(ts)] [homenetsec] WARN: hourly_ingest failed; continuing with daily pipeline"
+  echo "[$(ts)] [homenetsec] hourly_ingest: end"
+fi
+
 # Generate report
 HOMENETSEC_WORKDIR="$WORKDIR" "$PIPELINE" "$TODAY_ET" >/dev/null
 
