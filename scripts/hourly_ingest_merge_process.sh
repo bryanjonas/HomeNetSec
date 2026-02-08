@@ -51,36 +51,79 @@ compose() {
 now_epoch=$(date +%s)
 cutoff_epoch=$(( now_epoch - SAFETY_LAG_SECONDS ))
 
-last_epoch=0
+# State model (gap-safe catch-up)
+# - last_contiguous_epoch: last epoch for which we have processed all eligible segments up to that point
+# - high_watermark_epoch: highest eligible epoch we've seen (or attempted) so far
+# - pending: list of segments we still need to copy/validate (may be older than 1h)
+last_contig_epoch=0
+high_epoch=0
+pending_json='[]'
+
 if [[ -f "$STATE_JSON" ]]; then
-  last_epoch=$(python3 - <<PY
+  read -r last_contig_epoch high_epoch pending_json < <(python3 - <<'PY'
 import json
-p="$STATE_JSON"
+p = "$STATE_JSON"
 try:
-  j=json.load(open(p,'r',encoding='utf-8'))
-  print(int(j.get('last_epoch',0) or 0))
+  j = json.load(open(p,'r',encoding='utf-8'))
 except Exception:
-  print(0)
+  j = {}
+# Back-compat: older state used last_epoch
+last_epoch = int(j.get('last_epoch', 0) or 0)
+last_contig = int(j.get('last_contiguous_epoch', last_epoch) or 0)
+high = int(j.get('high_watermark_epoch', last_epoch) or 0)
+pending = j.get('pending', []) or []
+print(f"{last_contig} {high} {json.dumps(pending)}")
 PY
 )
 fi
 
-if (( last_epoch <= 0 )); then
+if (( last_contig_epoch <= 0 )); then
   # First run: only pull last hour window (so we don't backfill an entire day).
-  last_epoch=$(( now_epoch - 3600 ))
+  last_contig_epoch=$(( now_epoch - 3600 ))
+fi
+if (( high_epoch <= 0 )); then
+  high_epoch=$last_contig_epoch
 fi
 
-start_day=$(date -d "@$last_epoch" +%F)
-# IMPORTANT: include "today" in the listing window even if cutoff_epoch is still yesterday.
-# We still filter candidates by cutoff_epoch later; this just ensures day-rollover doesn't stall ingest.
+# Build the list of days to query on OPNsense.
+# Unlike the old implementation (2-day bridge), we include ALL days between last_contig and today,
+# plus any days implied by pending epochs, so multi-day downtime catch-up works.
+start_day=$(date -d "@$last_contig_epoch" +%F)
 end_day=$(date -d "@$now_epoch" +%F)
 
-# day list (handle midnight boundary)
-# Keep it simple: we only need to bridge at most into "today" for midnight rollover.
-days="$start_day"$'\n'
-if [[ "$end_day" != "$start_day" ]]; then
-  days+="$end_day"$'\n'
-fi
+days_list=$(python3 - <<'PY'
+import datetime as dt, json
+sd = dt.date.fromisoformat("$start_day")
+ed = dt.date.fromisoformat("$end_day")
+pending = []
+try:
+  pending = json.loads("""$pending_json""")
+except Exception:
+  pending = []
+extra_days = set()
+for it in pending:
+  try:
+    ep = int(it.get('epoch', 0) or 0)
+    if ep > 0:
+      extra_days.add(dt.datetime.fromtimestamp(ep).date().isoformat())
+  except Exception:
+    pass
+
+days = []
+d = sd
+while d <= ed:
+  days.append(d.isoformat())
+  d += dt.timedelta(days=1)
+
+# Add pending days (if any), then dedupe + sort
+for x in sorted(extra_days):
+  if x not in days:
+    days.append(x)
+
+print("\n".join(sorted(set(days))))
+PY
+)
+mapfile -t days <<< "$days_list"
 
 # NOTE: OPNsense often runs a non-interactive SSH account for PCAP pulls.
 # To support that, we use SFTP (no remote shell commands).
@@ -142,17 +185,10 @@ dt=datetime.datetime(d.year,d.month,d.day,int(m.group(2)),int(m.group(3)),int(m.
 print(int(dt.timestamp()))' "$bn"
 }
 
-# 1) Build remote list
+# 1) Build remote list (across all relevant days)
 all_files=""
-for day in "$start_day" "$end_day"; do
+for day in "${days[@]}"; do
   [[ -z "$day" ]] && continue
-  # avoid duplicate listing if start_day == end_day
-  if [[ "$day" == "$start_day" && "$start_day" == "$end_day" ]]; then
-    :
-  elif [[ "$day" == "$end_day" && "$start_day" == "$end_day" ]]; then
-    continue
-  fi
-
   if ! part=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${day}_*.pcap*" | sort); then
     echo "[homenetsec] ERROR: SFTP list failed for day=$day ($OPNSENSE_USER@$OPNSENSE_HOST:$OPNSENSE_PCAP_DIR)" >&2
     exit 1
@@ -161,19 +197,44 @@ for day in "$start_day" "$end_day"; do
 done
 
 if [[ -z "$all_files" ]]; then
-  echo "[homenetsec] No remote pcaps found (days=$start_day..$end_day)."
+  echo "[homenetsec] No remote pcaps found (days=${days[0]:-?}..${days[-1]:-?})."
   exit 0
 fi
 
-export LAST_EPOCH="$last_epoch" CUTOFF_EPOCH="$cutoff_epoch"
+# 2) Filter remote list into candidates:
+# - eligible fresh files: (last_contig_epoch, cutoff_epoch]
+# - plus any pending epochs <= cutoff_epoch (even if older)
+# - apply PULL_SKIP_NEWEST_N only to the newest N of the FRESH set (not pending)
+export LAST_CONTIG_EPOCH="$last_contig_epoch" CUTOFF_EPOCH="$cutoff_epoch" HIGH_EPOCH="$high_epoch" PENDING_JSON="$pending_json"
 
-filtered=$(printf '%s' "$all_files" | python3 -c 'import os, re, sys, datetime
-last=int(os.environ["LAST_EPOCH"])
-cutoff=int(os.environ["CUTOFF_EPOCH"])
+candidates_tsv=$(printf '%s' "$all_files" | python3 - <<'PY'
+import os, re, sys, json, datetime
+
+last_contig = int(os.environ['LAST_CONTIG_EPOCH'])
+cutoff = int(os.environ['CUTOFF_EPOCH'])
+high_prev = int(os.environ.get('HIGH_EPOCH', '0') or 0)
+
+pending = []
+try:
+  pending = json.loads(os.environ.get('PENDING_JSON','[]') or '[]')
+except Exception:
+  pending = []
+
+pending_epochs = set()
+pending_by_epoch = {}
+for it in pending:
+  try:
+    ep = int(it.get('epoch',0) or 0)
+    path = (it.get('path') or '').strip()
+    if ep>0 and path:
+      pending_epochs.add(ep)
+      pending_by_epoch[ep] = path
+  except Exception:
+    pass
 
 def to_epoch(path: str):
-  bn=path.strip().split("/")[-1]
-  m=re.match(r"^lan-(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.pcap", bn)
+  bn=path.strip().split('/')[-1]
+  m=re.match(r'^lan-(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.pcap', bn)
   if not m:
     return None
   day, hh, mm, ss = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
@@ -181,36 +242,102 @@ def to_epoch(path: str):
   dt=datetime.datetime(d.year,d.month,d.day,hh,mm,ss)
   return int(dt.timestamp())
 
-out=[]
+seen = {}
+max_seen_eligible = high_prev
 for line in sys.stdin:
   p=line.strip()
   if not p:
     continue
-  ep=to_epoch(p)
+  ep = to_epoch(p)
   if ep is None:
     continue
-  if last < ep <= cutoff:
-    out.append((ep,p))
+  seen[ep] = p
+  if last_contig < ep <= cutoff and ep > max_seen_eligible:
+    max_seen_eligible = ep
+
+# Build candidate list with a pending flag
+out = []
+for ep, p in seen.items():
+  if ep in pending_epochs and ep <= cutoff:
+    out.append((ep, p, 1))
+  elif last_contig < ep <= cutoff:
+    out.append((ep, p, 0))
 
 out.sort()
-for _,p in out:
-  print(p)
-')
+for ep, p, is_pending in out:
+  print(f"{ep}\t{p}\t{is_pending}\t{max_seen_eligible}")
+PY
+)
 
-if [[ -z "$filtered" ]]; then
-  echo "[homenetsec] No new pcaps since last_epoch=$last_epoch (cutoff=$cutoff_epoch)."
+if [[ -z "$candidates_tsv" ]]; then
+  echo "[homenetsec] No eligible pcaps (last_contig_epoch=$last_contig_epoch cutoff=$cutoff_epoch)."
   exit 0
 fi
 
-mapfile -t new_files <<< "$filtered"
+# Parse candidates TSV
+candidate_epochs=()
+candidate_paths=()
+candidate_pending=()
+max_seen_eligible=0
+while IFS=$'\t' read -r ep path is_pending max_seen; do
+  [[ -z "$ep" || -z "$path" ]] && continue
+  candidate_epochs+=("$ep")
+  candidate_paths+=("$path")
+  candidate_pending+=("$is_pending")
+  max_seen_eligible="$max_seen"
+done <<< "$candidates_tsv"
 
-# Skip newest N from this candidate set too (extra partial protection)
-if (( ${#new_files[@]} <= PULL_SKIP_NEWEST_N )); then
-  echo "[homenetsec] Found ${#new_files[@]} new pcaps; skipping because PULL_SKIP_NEWEST_N=$PULL_SKIP_NEWEST_N"
-  exit 0
+high_seen_epoch=${max_seen_eligible:-$high_epoch}
+
+# Apply skip-newest only to FRESH candidates (pending=0)
+fresh_idxs=()
+for i in "${!candidate_paths[@]}"; do
+  if [[ "${candidate_pending[$i]}" == "0" ]]; then
+    fresh_idxs+=("$i")
+  fi
+done
+
+skipped_epochs=()
+use_idxs=()
+if (( ${#fresh_idxs[@]} > PULL_SKIP_NEWEST_N )); then
+  # skip last N fresh idxs (already sorted by epoch)
+  keep_count=$(( ${#fresh_idxs[@]} - PULL_SKIP_NEWEST_N ))
+  for ((j=0; j<keep_count; j++)); do
+    use_idxs+=("${fresh_idxs[$j]}")
+  done
+  for ((j=keep_count; j<${#fresh_idxs[@]}; j++)); do
+    idx="${fresh_idxs[$j]}"
+    skipped_epochs+=("${candidate_epochs[$idx]}")
+  done
+else
+  # if we don't have enough fresh files, we don't process fresh this run
+  for idx in "${fresh_idxs[@]}"; do
+    skipped_epochs+=("${candidate_epochs[$idx]}")
+  done
 fi
 
-upto=$(( ${#new_files[@]} - PULL_SKIP_NEWEST_N ))
+# Always include pending candidates (even if few fresh)
+for i in "${!candidate_paths[@]}"; do
+  if [[ "${candidate_pending[$i]}" == "1" ]]; then
+    use_idxs+=("$i")
+  fi
+done
+
+# Dedup idx list while preserving order
+uniq_use_idxs=()
+seen_idx=" "
+for idx in "${use_idxs[@]}"; do
+  if [[ "$seen_idx" != *" $idx "* ]]; then
+    uniq_use_idxs+=("$idx")
+    seen_idx+="$idx "
+  fi
+done
+use_idxs=("${uniq_use_idxs[@]}")
+
+if (( ${#use_idxs[@]} == 0 )); then
+  echo "[homenetsec] No candidates to process after skip-newest (pending=0, fresh<=skip)."
+  exit 0
+fi
 
 # 2) Download missing and track local paths for merge
 # Strategy:
@@ -219,11 +346,55 @@ upto=$(( ${#new_files[@]} - PULL_SKIP_NEWEST_N ))
 # - Validate by rewriting via tshark to the final path
 # - Skip/quarantine any pcap that fails validation; continue with the rest
 local_paths=()
-max_epoch=0
+ok_epochs=()
 
-for (( i=0; i<upto; i++ )); do
-  remote="${new_files[$i]}"
+# pending_next will be computed from previous pending + any failures this run.
+pending_next_json='[]'
+
+add_pending() {
+  local ep="$1"; local path="$2"; local err="$3"
+  pending_next_json=$(python3 - <<PY
+import json, time
+prev = []
+try:
+  prev = json.loads('''$pending_next_json''') if '''$pending_next_json'''.strip() else []
+except Exception:
+  prev = []
+base = []
+try:
+  base = json.loads('''$pending_json''') if '''$pending_json'''.strip() else []
+except Exception:
+  base = []
+
+items = {}
+for it in (base + prev):
+  try:
+    e = int(it.get('epoch',0) or 0)
+    if e>0:
+      items[e] = it
+  except Exception:
+    pass
+
+ep = int($ep)
+cur = items.get(ep, {})
+cur['epoch'] = ep
+cur['path'] = '$path'
+cur['tries'] = int(cur.get('tries',0) or 0) + 1
+cur['last_error'] = '$err'
+cur['updated_at'] = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+items[ep] = cur
+
+out = [items[k] for k in sorted(items.keys())]
+print(json.dumps(out))
+PY
+)
+}
+
+# Iterate selected candidate indices (pending + fresh-minus-skip)
+for idx in "${use_idxs[@]}"; do
+  remote="${candidate_paths[$idx]}"
   base=$(basename "$remote")
+  ep="${candidate_epochs[$idx]}"
   day=$(echo "$base" | cut -d_ -f1 | sed 's/^lan-//')
   out_dir="$WORKDIR/pcaps/$day"
   mkdir -p "$out_dir"
@@ -232,14 +403,13 @@ for (( i=0; i<upto; i++ )); do
   # If we already have a validated local copy, include it.
   if [[ -f "$out_path" ]]; then
     local_paths+=("$out_path")
-    ep=$(epoch_from_basename "$base")
-    (( ep > max_epoch )) && max_epoch=$ep
+    ok_epochs+=("$ep")
     continue
   fi
 
-  # Remote stability check to avoid copying actively-written segments.
   if ! remote_is_stable "$remote"; then
     echo "[homenetsec] skip(unstable): $remote"
+    add_pending "$ep" "$remote" "unstable"
     continue
   fi
 
@@ -250,21 +420,20 @@ for (( i=0; i<upto; i++ )); do
   if ! sftp_get "$remote" "$tmp_path"; then
     echo "[homenetsec] WARN: sftp get failed for $remote" >&2
     rm -f -- "$tmp_path" 2>/dev/null || true
+    add_pending "$ep" "$remote" "sftp_get_failed"
     continue
   fi
 
-  # Validate/normalize by rewriting via tshark.
-  # If tshark can read and write, the file is parseable end-to-end.
   if tshark -r "$tmp_path" -w "$out_path" >/dev/null 2>&1; then
     rm -f -- "$tmp_path" 2>/dev/null || true
     local_paths+=("$out_path")
-    ep=$(epoch_from_basename "$base")
-    (( ep > max_epoch )) && max_epoch=$ep
+    ok_epochs+=("$ep")
   else
     bad_path="$out_path.bad.$(date +%s)"
     mv -f -- "$tmp_path" "$bad_path" 2>/dev/null || true
     rm -f -- "$out_path" 2>/dev/null || true
     echo "[homenetsec] WARN: invalid pcap (quarantined): $bad_path" >&2
+    add_pending "$ep" "$remote" "invalid_pcap"
     continue
   fi
 
@@ -360,14 +529,104 @@ echo "[homenetsec] zeek(docker) -> $merge_name"
 compose --profile zeek run --rm -e PCAP="$merged_in_container" zeek-offline || \
   echo "[homenetsec] WARN: zeek failed for merged pcap; continuing"
 
-# 5) Update state: advance last_epoch to the newest validated file timestamp we actually processed
-new_last="$max_epoch"
+# 5) Update state (gap-safe)
+# - last_contiguous_epoch advances only when we've validated all eligible segments up to that epoch
+# - high_watermark_epoch tracks the highest eligible epoch observed
+# - pending tracks missing/failed segments to retry on future runs
+export LAST_CONTIG_EPOCH="$last_contig_epoch" HIGH_EPOCH="$high_epoch" HIGH_SEEN_EPOCH="$high_seen_epoch"
+export SKIPPED_EPOCHS_JSON="$(python3 - <<PY
+import json
+print(json.dumps([int(x) for x in "${skipped_epochs[*]}".split() if x.strip()]))
+PY
+)"
+export OK_EPOCHS_JSON="$(python3 - <<PY
+import json
+print(json.dumps([int(x) for x in "${ok_epochs[*]}".split() if x.strip()]))
+PY
+)"
+export CANDIDATE_MAP_JSON="$(python3 - <<PY
+import json
+# Build epoch->path map from bash arrays
+# We accept that later duplicates overwrite (shouldn't happen).
+epochs="${candidate_epochs[*]}".split()
+paths="${candidate_paths[*]}".split()
+out={}
+for e,p in zip(epochs,paths):
+  try:
+    out[int(e)]=p
+  except Exception:
+    pass
+print(json.dumps(out))
+PY
+)"
+
+read -r new_contig new_high pending_final_json < <(python3 - <<'PY'
+import json, os, time
+
+last_contig = int(os.environ['LAST_CONTIG_EPOCH'])
+high_prev = int(os.environ.get('HIGH_EPOCH','0') or 0)
+high_seen = int(os.environ.get('HIGH_SEEN_EPOCH','0') or 0)
+
+skipped = set(json.loads(os.environ.get('SKIPPED_EPOCHS_JSON','[]') or '[]'))
+ok = set(json.loads(os.environ.get('OK_EPOCHS_JSON','[]') or '[]'))
+mp = json.loads(os.environ.get('CANDIDATE_MAP_JSON','{}') or '{}')
+# mp keys are strings if reloaded; normalize
+mp2 = {}
+for k,v in mp.items():
+  try:
+    mp2[int(k)] = v
+  except Exception:
+    pass
+mp = mp2
+
+# pending_next_json was built in bash and includes prev+new failures
+pending = []
+try:
+  pending = json.loads('''$pending_next_json''') if '''$pending_next_json'''.strip() else []
+except Exception:
+  pending = []
+
+# Eligible epochs are all candidate epochs excluding skipped-newest epochs
+eligible_epochs = sorted([e for e in mp.keys() if e not in skipped and e > last_contig])
+
+# Any eligible epoch not ok should remain pending
+pending_by_epoch = {int(it.get('epoch',0) or 0): it for it in pending if int(it.get('epoch',0) or 0) > 0}
+for e in eligible_epochs:
+  if e not in ok:
+    it = pending_by_epoch.get(e, {})
+    it['epoch'] = e
+    it['path'] = mp.get(e, it.get('path',''))
+    it['tries'] = int(it.get('tries',0) or 0)
+    it.setdefault('last_error', 'missing_or_failed')
+    it['updated_at'] = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    pending_by_epoch[e] = it
+
+# Advance contiguous watermark
+new_contig = last_contig
+for e in eligible_epochs:
+  if e in ok:
+    new_contig = e
+  else:
+    break
+
+# Drop pending entries <= new_contig
+pending_out = [pending_by_epoch[e] for e in sorted(pending_by_epoch.keys()) if e > new_contig]
+
+new_high = max(high_prev, high_seen, new_contig)
+
+print(f"{new_contig} {new_high} {json.dumps(pending_out)}")
+PY
+)
 
 python3 - <<PY
 import json, time
 p="$STATE_JSON"
 j={
-  "last_epoch": int($new_last),
+  # Back-compat key
+  "last_epoch": int($new_contig),
+  "last_contiguous_epoch": int($new_contig),
+  "high_watermark_epoch": int($new_high),
+  "pending": $pending_final_json,
   "updated_at": time.strftime('%Y-%m-%dT%H:%M:%S%z'),
   "last_merge": "$merge_name",
   "merge_day": "$merge_day",
@@ -377,7 +636,11 @@ json.dump(j, open(p,'w',encoding='utf-8'), indent=2)
 print(p)
 PY
 
-echo "[homenetsec] hourly ingest complete (processed up to epoch=$new_last)"
+echo "[homenetsec] hourly ingest complete (contiguous_epoch=$new_contig high_watermark=$new_high pending=$(python3 - <<PY
+import json
+print(len(json.loads('''$pending_final_json''') if '''$pending_final_json'''.strip() else '[]'))
+PY
+))"
 
 # 6) Retention cleanup
 # - merged PCAPs: 7 days

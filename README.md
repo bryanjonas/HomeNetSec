@@ -20,7 +20,7 @@ HomeNetSec has two loops:
 **Goal:** keep analysis incremental and avoid the overhead of spinning up a Zeek container for each tiny PCAP.
 
 The hourly job:
-1. Downloads **only new PCAPs since the last ingest** (tracked via `output/state/hourly_ingest_state.json`).
+1. Downloads **eligible new PCAPs since the last contiguous ingest** (tracked via `output/state/hourly_ingest_state.json`). This state is *gap-safe*: it retains a retry list of missing/failed segments so older uncopied files are still fetched later.
 2. Applies **partial protections**:
    - skips newest `PULL_SKIP_NEWEST_N` remote files (default: 1)
    - ignores anything newer than `now - SAFETY_LAG_SECONDS` (default: 120s)
