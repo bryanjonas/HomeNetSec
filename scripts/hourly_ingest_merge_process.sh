@@ -18,6 +18,11 @@ mkdir -p "$STATE_DIR"
 
 STATE_JSON="$STATE_DIR/hourly_ingest_state.json"
 
+# Retention
+MERGED_PCAP_RETENTION_DAYS="${MERGED_PCAP_RETENTION_DAYS:-7}"
+HOURLY_ARTIFACT_RETENTION_DAYS="${HOURLY_ARTIFACT_RETENTION_DAYS:-30}"
+
+
 # OPNsense pull settings
 OPNSENSE_HOST="${OPNSENSE_HOST:-192.168.1.X}"
 OPNSENSE_USER="${OPNSENSE_USER:-openclaw}"
@@ -283,3 +288,18 @@ print(p)
 PY
 
 echo "[homenetsec] hourly ingest complete (processed up to epoch=$new_last)"
+
+# 6) Retention cleanup
+# - merged PCAPs: 7 days
+# - Zeek logs + Suricata EVE outputs from hourly merged runs: 30 days
+if [[ "${RUN_RETENTION_CLEANUP:-1}" == "1" ]]; then
+  echo "[homenetsec] retention: merged pcaps older than ${MERGED_PCAP_RETENTION_DAYS} days"
+  find "$WORKDIR/pcaps" -type f -name 'merged-*.pcap' -mtime +"$MERGED_PCAP_RETENTION_DAYS" -print0 | xargs -0 -r rm -f
+
+  echo "[homenetsec] retention: hourly zeek/suricata artifacts older than ${HOURLY_ARTIFACT_RETENTION_DAYS} days"
+  # Zeek per-merge output dirs end with .zeek
+  find "$WORKDIR/zeek-logs" -type d -name '*.zeek' -mtime +"$HOURLY_ARTIFACT_RETENTION_DAYS" -print0 | xargs -0 -r rm -rf
+  # Suricata per-merge eve files
+  find "$WORKDIR/suricata" -type f -name 'eve-merged-*.json' -mtime +"$HOURLY_ARTIFACT_RETENTION_DAYS" -print0 | xargs -0 -r rm -f
+fi
+
