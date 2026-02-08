@@ -183,25 +183,56 @@ merge_name="merged-${first_bn%.*}-to-${last_bn%.*}.pcap"
 merge_path="$merge_dir/$merge_name"
 
 echo "[homenetsec] mergecap -> $merge_path (${#local_paths[@]} pcaps)"
-mergecap -w "$merge_path" "${local_paths[@]}"
 
-# Verify merge (packet counts): merged packet count should equal the sum of inputs.
-# This is fast and catches truncated/failed merges.
-if [[ "${VERIFY_MERGE:-1}" == "1" ]]; then
-  echo "[homenetsec] verify_merge: start"
-  in_pkts=$(capinfos -c "${local_paths[@]}" 2>/dev/null | awk '/Number of packets/ {sum += $NF} END {printf("%d", sum+0)}')
-  out_pkts=$(capinfos -c "$merge_path" 2>/dev/null | awk '/Number of packets/ {print $NF; exit}')
-  if [[ -z "${out_pkts:-}" ]]; then
-    echo "[homenetsec] ERROR: verify_merge failed to read merged pcap via capinfos" >&2
+# Merge with one retry (helps with transient IO hiccups)
+MERGE_RETRIES="${MERGE_RETRIES:-1}"
+merge_attempt=0
+while :; do
+  merge_attempt=$((merge_attempt + 1))
+  rm -f -- "$merge_path" 2>/dev/null || true
+
+  if mergecap -w "$merge_path" "${local_paths[@]}"; then
+    :
+  else
+    if (( merge_attempt <= MERGE_RETRIES )); then
+      echo "[homenetsec] WARN: mergecap failed (attempt ${merge_attempt}); retrying" >&2
+      sleep 1
+      continue
+    fi
+    echo "[homenetsec] ERROR: mergecap failed after ${merge_attempt} attempt(s)" >&2
     exit 1
   fi
-  if (( in_pkts != out_pkts )); then
-    echo "[homenetsec] ERROR: verify_merge packet mismatch: inputs=$in_pkts merged=$out_pkts" >&2
-    echo "[homenetsec]        refusing to delete source pcaps" >&2
-    exit 1
+
+  # Verify merge (packet counts): merged packet count should equal the sum of inputs.
+  # This is fast and catches truncated/failed merges.
+  if [[ "${VERIFY_MERGE:-1}" == "1" ]]; then
+    echo "[homenetsec] verify_merge: start (attempt ${merge_attempt})"
+    in_pkts=$(capinfos -c "${local_paths[@]}" 2>/dev/null | awk '/Number of packets/ {sum += $NF} END {printf("%d", sum+0)}')
+    out_pkts=$(capinfos -c "$merge_path" 2>/dev/null | awk '/Number of packets/ {print $NF; exit}')
+    if [[ -z "${out_pkts:-}" ]]; then
+      if (( merge_attempt <= MERGE_RETRIES )); then
+        echo "[homenetsec] WARN: verify_merge could not read merged pcap (attempt ${merge_attempt}); retrying" >&2
+        sleep 1
+        continue
+      fi
+      echo "[homenetsec] ERROR: verify_merge failed to read merged pcap via capinfos" >&2
+      exit 1
+    fi
+    if (( in_pkts != out_pkts )); then
+      if (( merge_attempt <= MERGE_RETRIES )); then
+        echo "[homenetsec] WARN: verify_merge mismatch (attempt ${merge_attempt}): inputs=$in_pkts merged=$out_pkts; retrying" >&2
+        sleep 1
+        continue
+      fi
+      echo "[homenetsec] ERROR: verify_merge packet mismatch: inputs=$in_pkts merged=$out_pkts" >&2
+      echo "[homenetsec]        refusing to delete source pcaps" >&2
+      exit 1
+    fi
+    echo "[homenetsec] verify_merge: ok (packets=$out_pkts)"
   fi
-  echo "[homenetsec] verify_merge: ok (packets=$out_pkts)"
-fi
+
+  break
+done
 
 # Optionally delete the source PCAPs that were merged (safe only after verify_merge).
 if [[ "${DELETE_MERGED_INPUTS:-1}" == "1" ]]; then
