@@ -61,14 +61,32 @@ with open(out_path, 'w', encoding='utf-8') as f:
 PY
 
 # Build the single-page dashboard at / (index.html).
-python3 - "$WWW_DIR/status.json" "$REPORT_TXT" "$DIGEST_JSON" "$CANDIDATES_JSON" "$WWW_DIR/index.html" <<'PY'
+python3 - "$WWW_DIR/status.json" "$REPORT_TXT" "$DIGEST_JSON" "$CANDIDATES_JSON" "$WORKDIR/state/feedback.json" "$WWW_DIR/index.html" <<'PY'
 import html, json, os, sys, hashlib
 
-status_path, report_path, digest_path, candidates_path, out_path = sys.argv[1:6]
+status_path, report_path, digest_path, candidates_path, feedback_path, out_path = sys.argv[1:7]
 
 st = json.load(open(status_path, 'r', encoding='utf-8'))
 hourly = st.get('hourly_state') or {}
 day = st.get('today_et') or ''
+
+# Load persisted feedback so dismissed alerts are not even rendered into HTML.
+# (JS still hydrates for comments/verdicts/etc when available.)
+feedback_for_day = {}
+try:
+    fb = json.load(open(feedback_path, 'r', encoding='utf-8'))
+    feedback_for_day = (fb.get(day) or {}) if isinstance(fb, dict) else {}
+except FileNotFoundError:
+    feedback_for_day = {}
+except Exception:
+    feedback_for_day = {}
+
+def is_dismissed(alert_id: str) -> bool:
+    try:
+        rec = feedback_for_day.get(alert_id) or {}
+        return bool(rec.get('dismissed'))
+    except Exception:
+        return False
 
 # hourly state key drift compatibility
 last_epoch = hourly.get('last_epoch')
@@ -100,11 +118,15 @@ if digest and isinstance(digest.get('items'), list):
     for it in digest.get('items'):
         if not isinstance(it, dict):
             continue
+        alert_id = it.get('id') or None
+        # If the digest has an id and it was dismissed, do not render it.
+        if alert_id and is_dismissed(str(alert_id)):
+            continue
         alerts.append({
             'kind': 'digest_item',
             'title': it.get('title') or '(untitled)',
             'data': it,
-            'id': it.get('id') or None,
+            'id': alert_id,
         })
 else:
     if candidates:
