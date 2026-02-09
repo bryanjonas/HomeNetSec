@@ -31,6 +31,40 @@ PRIVATE_RE = re.compile(r"^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)")
 WATCH_PORTS = {"22", "445", "8883", "8443"}
 
 
+def _load_watch_ports_local(workdir: str) -> set[str]:
+    """Load additional watch ports from an uncommitted local file.
+
+    Location (default):
+      $HOMENETSEC_WORKDIR/state/watch_ports.local.txt
+
+    Format:
+      - one port per line
+      - allow comments with leading '#'
+    """
+    try:
+        p = os.environ.get("HOMENETSEC_WATCH_PORTS_FILE") or os.path.join(workdir, "state", "watch_ports.local.txt")
+        if not os.path.exists(p):
+            return set()
+        out: set[str] = set()
+        for line in open(p, "r", encoding="utf-8", errors="replace"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # allow "port/proto" but only keep numeric port here
+            m = re.match(r"^(\d{1,5})", line)
+            if not m:
+                continue
+            port = m.group(1)
+            try:
+                if 0 < int(port) < 65536:
+                    out.add(port)
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return set()
+
+
 def is_private(ip: str) -> bool:
     return bool(PRIVATE_RE.match(ip))
 
@@ -148,6 +182,10 @@ def main() -> int:
 
     dest_counts: Counter[Tuple[str, str]] = Counter()  # (src, dst)
     watch_counts: Counter[Tuple[str, str, str]] = Counter()  # (src, dst, port)
+
+    # Expand watch ports with any local overrides.
+    workdir = os.environ.get("HOMENETSEC_WORKDIR") or os.path.abspath(os.path.join(zeek_flat, ".."))
+    watch_ports = set(WATCH_PORTS) | _load_watch_ports_local(workdir)
     fanout_dsts: Dict[str, set] = defaultdict(set)
     fanout_total: Counter[str] = Counter()
 
@@ -178,7 +216,7 @@ def main() -> int:
             fanout_total[src] += 1
             fanout_dsts[src].add(dst)
 
-            if proto == "tcp" and port in WATCH_PORTS:
+            if proto == "tcp" and port in watch_ports:
                 watch_counts[(src, dst, port)] += 1
 
     dns_counts: Counter[Tuple[str, str, str]] = Counter()  # (client, qname, rcode)
