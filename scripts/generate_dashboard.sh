@@ -74,7 +74,8 @@ PY
 
 # Build the single-page dashboard at / (index.html).
 python3 - "$WWW_DIR/status.json" "$REPORTS_DIR" "$DIGEST_JSON" "$CANDIDATES_JSON" "$WORKDIR/state/feedback.json" "$WORKDIR/state/alerts_queue.json" "$WWW_DIR/index.html" <<'PY'
-import html, json, os, sys, hashlib, time
+import html, json, os, sys, hashlib, time, re
+from urllib.request import Request, urlopen
 
 status_path, reports_dir, digest_path, candidates_path, feedback_path, queue_path, out_path = sys.argv[1:8]
 
@@ -129,9 +130,62 @@ last_epoch = hourly.get('last_epoch')
 if last_epoch is None:
     last_epoch = hourly.get('last_ingested_epoch')
 
+def adguard_client_map() -> dict:
+    """Best-effort {client_id/ip: friendly name} from AdGuard Home."""
+    url = (os.environ.get('ADGUARD_URL') or '').rstrip('/')
+    user = os.environ.get('ADGUARD_USER') or ''
+    pw = os.environ.get('ADGUARD_PASS') or ''
+    if not (url and user and pw):
+        return {}
+
+    try:
+        login_url = f"{url}/control/login"
+        body = json.dumps({"name": user, "password": pw}).encode('utf-8')
+        resp = urlopen(Request(login_url, data=body, method='POST', headers={'Content-Type': 'application/json'}), timeout=20)
+        cookies = resp.headers.get_all('Set-Cookie') or []
+        resp.read()
+        cookie = '; '.join([c.split(';', 1)[0] for c in cookies if c])
+        raw = urlopen(Request(f"{url}/control/clients", headers={'Cookie': cookie}), timeout=20).read()
+        payload = json.loads(raw.decode('utf-8', errors='replace'))
+
+        out = {}
+        for it in (payload.get('clients') or []):
+            if not isinstance(it, dict):
+                continue
+            name = (it.get('name') or '').strip()
+            if not name:
+                continue
+            for cid in (it.get('ids') or []):
+                if cid:
+                    out[str(cid)] = name
+        return out
+    except Exception:
+        return {}
+
+
+def replace_ips_with_names(text: str, cmap: dict) -> str:
+    if not text or not cmap:
+        return text
+
+    ip_re = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b')
+
+    def repl(m):
+        ip = m.group(0)
+        nm = cmap.get(ip)
+        if not nm:
+            return ip
+        # Avoid double-wrapping if already formatted.
+        # If the immediate following characters already include "(" and the IP, leave as-is.
+        return f"{nm} ({ip})"
+
+    return ip_re.sub(repl, text)
+
+
 # Rolling 24h roll-up: concatenate report files modified in the last 24 hours.
 report_txt = ''
 try:
+    cmap = adguard_client_map()
+
     now = time.time()
     paths = []
     if os.path.isdir(reports_dir):
@@ -156,7 +210,8 @@ try:
         txt = open(p, 'r', encoding='utf-8', errors='replace').read().strip()
         if not txt:
             continue
-        chunks.append(f"===== {label} (mtime {ts}) =====\n{txt}\n")
+        txt2 = replace_ips_with_names(txt, cmap)
+        chunks.append(f"===== {label} (mtime {ts}) =====\n{txt2}\n")
 
     report_txt = "\n".join(chunks).strip()
 except Exception:
