@@ -276,11 +276,18 @@ def _suricata_summarize(workdir: str, day: str, src_dst_interest: set[tuple[str,
     - TLS fingerprints (JA4) from EVE tls events
     - Alerts from fast.log (reliable even when EVE alert events are disabled)
 
+    Returns:
+      {
+        "alerts": [{"key": str, "count": int, "priority": int}],
+        "alerts_by_sig": { key: {"priority": int, "count": int, "top_tuples": [{"src_ip":..,"dst_ip":..,"dst_port":..,"count":..}] } },
+        "tls_fp": {"src|dst": [{"ja4":...,"count":...}, ...]}
+      }
+
     Keep it cheap: only scan a handful of recent eve-*.json files, and only the tail of fast.log.
     """
     suri_dir = os.path.join(workdir, "suricata", day)
     if not os.path.isdir(suri_dir):
-        return {"alerts": [], "tls_fp": {}}
+        return {"alerts": [], "alerts_by_sig": {}, "tls_fp": {}}
 
     # Prefer per-merged EVE files; fall back to eve.json
     eve_files = sorted(glob.glob(os.path.join(suri_dir, "eve-*.json")))
@@ -324,9 +331,11 @@ def _suricata_summarize(workdir: str, day: str, src_dst_interest: set[tuple[str,
     # Alerts from fast.log tail
     fast_path = os.path.join(suri_dir, "fast.log")
     alert_counts = Counter()
+    alert_prio = {}
+    tuple_counts = Counter()  # (sig_key, src_ip, dst_ip, dst_port)
+
     try:
         if os.path.exists(fast_path):
-            # Read tail in a memory-bounded way
             from collections import deque
 
             dq = deque(maxlen=50000)
@@ -335,20 +344,56 @@ def _suricata_summarize(workdir: str, day: str, src_dst_interest: set[tuple[str,
                     dq.append(line.rstrip("\n"))
 
             # Example fast.log line:
-            # 02/09/2026-05:06:30.889307  [**] [1:2260002:1] SURICATA Applayer ... [**] ...
+            # 02/09/2026-05:06:30.889307  [**] [1:2260002:1] SURICATA ... [**] [Classification: ...] [Priority: 3] {TCP} 192.168.1.X:53104 -> 204.80.128.1:443
+            re_sig = re.compile(r"\[\*\*\]\s*\[(\d+):(\d+):(\d+)\]\s*([^\[]+?)\s*\[\*\*\]")
+            re_prio = re.compile(r"\[Priority:\s*(\d+)\]")
+            re_tuple = re.compile(r"\}\s+(\d+\.\d+\.\d+\.\d+):(\d+)\s+->\s+(\d+\.\d+\.\d+\.\d+):(\d+)")
+
             for line in dq:
-                m = re.search(r"\[\*\*\]\s*\[(\d+):(\d+):(\d+)\]\s*([^\[]+?)\s*\[\*\*\]", line)
+                m = re_sig.search(line)
                 if not m:
                     continue
                 gid, sid, rev, sig = m.group(1), m.group(2), m.group(3), m.group(4).strip()
                 key = f"{gid}:{sid}:{rev}:{sig}"
+
+                mp = re_prio.search(line)
+                prio = int(mp.group(1)) if mp else 3
+                # keep the lowest priority number seen for this signature
+                alert_prio[key] = min(prio, alert_prio.get(key, prio))
+
                 alert_counts[key] += 1
+
+                mt = re_tuple.search(line)
+                if mt:
+                    src_ip, src_port, dst_ip, dst_port = mt.group(1), mt.group(2), mt.group(3), mt.group(4)
+                    tuple_counts[(key, src_ip, dst_ip, int(dst_port))] += 1
     except Exception:
         pass
 
-    top_alerts = [{"key": k, "count": c} for k, c in alert_counts.most_common(8)]
+    top_alerts = [
+        {"key": k, "count": c, "priority": int(alert_prio.get(k, 3))}
+        for k, c in alert_counts.most_common(20)
+    ]
 
-    return {"alerts": top_alerts, "tls_fp": {f"{src}|{dst}": v for (src, dst), v in fp_by_tuple.items()}}
+    alerts_by_sig = {}
+    for ent in top_alerts:
+        k = ent["key"]
+        pr = ent.get("priority", 3)
+        # gather top tuples
+        tups = []
+        for (kk, src_ip, dst_ip, dst_port), c in tuple_counts.most_common(200):
+            if kk != k:
+                continue
+            tups.append({"src_ip": src_ip, "dst_ip": dst_ip, "dst_port": dst_port, "count": c})
+            if len(tups) >= 8:
+                break
+        alerts_by_sig[k] = {"priority": pr, "count": int(ent["count"]), "top_tuples": tups}
+
+    return {
+        "alerts": top_alerts,
+        "alerts_by_sig": alerts_by_sig,
+        "tls_fp": {f"{src}|{dst}": v for (src, dst), v in fp_by_tuple.items()},
+    }
 
 
 def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str, str], zeek_logs_root: str, enrichment_host_ip: str, workdir: str) -> dict:
@@ -528,22 +573,101 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
             }
         )
 
-    # 6) Suricata alerts summary (top signatures)
+    # 6) Suricata alerts: promote ONLY Priority 1–2 signatures as individual digest items.
+    # Priority 3 is currently dominated by decoder/capture artifacts and is treated as junk by default.
     top_alerts = suri.get("alerts") or []
-    if top_alerts:
+    alerts_by_sig = suri.get("alerts_by_sig") or {}
+
+    p12 = [a for a in top_alerts if int(a.get("priority", 3)) in (1, 2)]
+
+    for a in p12[:8]:
+        key = a.get("key")
+        if not key:
+            continue
+        meta = alerts_by_sig.get(key) or {}
+        prio = int(meta.get("priority", a.get("priority", 3)) or 3)
+        cnt = int(meta.get("count", a.get("count", 0)) or 0)
+
+        alert_id = f"suricata_sig|{key}|{day}"
+        if is_dismissed(feedback_for_day, alert_id):
+            continue
+
+        tuples = meta.get("top_tuples") or []
+        rep = tuples[0] if tuples else {}
+        src_ip = rep.get("src_ip", "")
+        dst_ip = rep.get("dst_ip", "")
+        dst_port = int(rep.get("dst_port") or 0)
+
+        src_name = client_map.get(src_ip, "") if src_ip else ""
+        domains = zeek_dns_domains_for_ip(zeek_logs_root, day, dst_ip) if dst_ip else []
+        domain = domains[0] if domains else ""
+
+        sig_text = key.split(":", 3)[-1]
+        title = f"Suricata P{prio}: {sig_text}"
+        if src_ip and dst_ip:
+            left = f"{src_name} ({src_ip})" if src_name else src_ip
+            right = dst_ip + (f":{dst_port}" if dst_port else "")
+            if domain:
+                right += f" (DNS: {domain})"
+            title = f"Suricata P{prio}: {left} → {right}"
+
+        ev_notes = [f"priority={prio}", f"count={cnt}"]
+        if tuples:
+            ev_notes.append(
+                "top_tuples=" + "; ".join(
+                    [
+                        f"{t.get('src_ip')}→{t.get('dst_ip')}:{t.get('dst_port')} ({t.get('count')})"
+                        for t in tuples[:5]
+                    ]
+                )
+            )
+
         items.append(
             {
-                "id": f"suricata_alerts|{day}",
+                "id": alert_id,
+                "kind": "suricata_signature_alert",
+                "severity": "high" if prio == 1 else "med",
+                "verdict": "needs_review",
+                "title": title,
+                "what": "Suricata signature matched traffic observed in offline PCAP processing.",
+                "why_flagged": f"Suricata Priority {prio} signature matched ({cnt} hits).",
+                "most_likely_explanation": "Depends on signature; correlate to DNS/SNI and device context.",
+                "confidence": 0.55,
+                "evidence": {
+                    "src_ip": src_ip,
+                    "src_name": src_name,
+                    "dst_ip": dst_ip,
+                    "dst_port": dst_port,
+                    "domain": domain,
+                    "notes": ev_notes,
+                },
+                "recommendation": {
+                    "action": "investigate",
+                    "steps": [
+                        "Review the ET/Open signature meaning (rule text).",
+                        "Correlate dst_ip to domain via Zeek dns.log and/or AdGuard query log.",
+                        "If expected, comment and dismiss; if not, investigate further.",
+                    ],
+                },
+                "allowlist_suggestion": {"type": "none", "value": "", "scope": "network", "reason": "", "ttl_days": 0},
+            }
+        )
+
+    # Keep a small summary card ONLY for Priority 1–2 if any exist.
+    if p12:
+        items.append(
+            {
+                "id": f"suricata_alerts_p12|{day}",
                 "kind": "suricata_alert_summary",
                 "severity": "info",
                 "verdict": "needs_review",
-                "title": "Suricata alerts (top signatures)",
-                "what": "Suricata ET Open signature alerts observed in offline processing.",
-                "why_flagged": "Alert events were generated by Suricata; review for high-signal signatures.",
-                "most_likely_explanation": "Many signatures are noisy; focus on malware/exploit/high-priority categories.",
-                "confidence": 0.6,
-                "evidence": {"notes": [f"{a['count']}× {a['key']}" for a in top_alerts[:8]]},
-                "recommendation": {"action": "monitor", "steps": ["If noisy, we can filter to priority<=2 or malware categories only."]},
+                "title": "Suricata alerts (Priority 1–2)",
+                "what": "High-priority Suricata signatures (Priority 1–2) observed in offline processing.",
+                "why_flagged": "Priority 1–2 signatures are surfaced as individual items above.",
+                "most_likely_explanation": "Review each signature item; dismiss those confirmed benign.",
+                "confidence": 0.65,
+                "evidence": {"notes": [f"{x.get('count')}× P{x.get('priority')} {x.get('key')}" for x in p12[:8]]},
+                "recommendation": {"action": "investigate", "steps": ["Review the per-signature items above."]},
                 "allowlist_suggestion": {"type": "none", "value": "", "scope": "network", "reason": "", "ttl_days": 0},
             }
         )

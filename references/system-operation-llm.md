@@ -78,6 +78,8 @@ Entry point:
 Goal:
 - run a catch-up hourly ingest pass
 - run the reporting layer (RITA + baselines + candidate detection + report)
+- run triage digest enrichment (AdGuard client names, DNS correlation, novelty)
+- include **Suricata Priority 1–2** signatures as individual digest items (Priority 3 is considered too noisy by default)
 - update the dashboard
 - send a Telegram message with a link to the dashboard
 
@@ -138,7 +140,9 @@ After verified merge:
 
 ### 4.6 Hourly processing
 For the merged PCAP:
-- Suricata offline writes EVE JSON (TLS enabled)
+- Suricata offline writes:
+  - EVE JSON (TLS enabled; may include alert events depending on config)
+  - `fast.log` / `suricata.log` (signature/decoder alerts)
 - Zeek offline writes logs
 
 ---

@@ -29,6 +29,7 @@ Write a JSON file:
   "items": [
     {
       "id": "stable-id-string",
+      "kind": "rita_beacon|dns_nxdomain_spike|suricata_signature_alert|suricata_alert_summary|...",
       "severity": "info|low|med|high",
       "verdict": "likely_benign|needs_review|suspicious",
       "title": "one-line title",
@@ -73,6 +74,8 @@ Write a JSON file:
 ```
 
 Notes:
+- Include a stable `kind` so the dashboard can render badges/sections consistently.
+- Suricata signatures: by default, only Priority 1–2 signatures should be promoted to individual digest items; Priority 3 is often dominated by decoder/capture noise.
 - `allowlist_suggestion` is the LLM’s recommendation; it must **not** imply firewall changes.
 - If the system auto-applies allowlist updates, record them in `allowlist_decisions` (and surface in the daily summary).
 - The dashboard can still accept user feedback per-item; this file is the machine-produced baseline digest.
