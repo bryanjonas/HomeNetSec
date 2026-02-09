@@ -26,10 +26,10 @@ CANDIDATES_JSON="$WORKDIR/state/${TODAY_ET}.candidates.json"
 mkdir -p "$WWW_DIR"
 
 # Build a minimal machine-readable status blob.
-python3 - "$STATE_JSON" "$TODAY_ET" "$REPORT_TXT" "$WWW_DIR/status.json" <<'PY'
+python3 - "$STATE_JSON" "$TODAY_ET" "$REPORT_TXT" "$WORKDIR/state/alerts_queue.json" "$WWW_DIR/status.json" <<'PY'
 import json, os, sys, time
 
-state_path, today_et, report_txt, out_path = sys.argv[1:5]
+state_path, today_et, report_txt, queue_path, out_path = sys.argv[1:6]
 
 def load_json(p):
     try:
@@ -43,10 +43,21 @@ state = load_json(state_path) or {}
 report_exists = os.path.exists(report_txt)
 report_mtime = int(os.path.getmtime(report_txt)) if report_exists else None
 
+# Count currently-active alerts (best-effort) so the status card can show queue size.
+queue_count = None
+try:
+    q = load_json(queue_path) or {}
+    items = q.get("items") if isinstance(q, dict) else None
+    if isinstance(items, dict):
+        queue_count = len(items)
+except Exception:
+    queue_count = None
+
 payload = {
     "generated_at": time.strftime('%Y-%m-%dT%H:%M:%S%z'),
     "today_et": today_et,
     "hourly_state": state,
+    "active_alerts": {"count": queue_count},
     "daily_report": {
         "path": os.path.basename(report_txt),
         "exists": report_exists,
@@ -61,10 +72,10 @@ with open(out_path, 'w', encoding='utf-8') as f:
 PY
 
 # Build the single-page dashboard at / (index.html).
-python3 - "$WWW_DIR/status.json" "$REPORT_TXT" "$DIGEST_JSON" "$CANDIDATES_JSON" "$WORKDIR/state/feedback.json" "$WWW_DIR/index.html" <<'PY'
+python3 - "$WWW_DIR/status.json" "$REPORT_TXT" "$DIGEST_JSON" "$CANDIDATES_JSON" "$WORKDIR/state/feedback.json" "$WORKDIR/state/alerts_queue.json" "$WWW_DIR/index.html" <<'PY'
 import html, json, os, sys, hashlib
 
-status_path, report_path, digest_path, candidates_path, feedback_path, out_path = sys.argv[1:7]
+status_path, report_path, digest_path, candidates_path, feedback_path, queue_path, out_path = sys.argv[1:8]
 
 st = json.load(open(status_path, 'r', encoding='utf-8'))
 hourly = st.get('hourly_state') or {}
@@ -135,42 +146,108 @@ if os.path.exists(candidates_path):
     except Exception:
         candidates = None
 
-# Build "alerts".
-# Prefer LLM triage digest if present; otherwise fall back to baseline candidates.
-alerts = []
+# Build today's alerts from digest/candidates.
+# These are used to update a persistent "active alerts" queue.
+alerts_today = []
 if digest and isinstance(digest.get('items'), list):
     for it in digest.get('items'):
         if not isinstance(it, dict):
             continue
         alert_id = it.get('id') or None
-        # If the digest has an id and it was dismissed, do not render it.
-        if alert_id and is_dismissed(str(alert_id)):
+        if not alert_id:
             continue
-        alerts.append({
-            'kind': 'digest_item',
+        alerts_today.append({
             'title': it.get('title') or '(untitled)',
             'data': it,
-            'id': alert_id,
+            'id': str(alert_id),
         })
 else:
+    # Fallback mode (legacy candidates) is kept for resilience; ids will be day-scoped.
     if candidates:
         for item in candidates.get('new_external_destinations', []) or []:
-            alerts.append({'kind': 'new_external_destination', 'title': f"New external destination: {item.get('dst_ip','?')}", 'data': item})
+            h = hashlib.sha256(('new_external_destination|' + json.dumps(item, sort_keys=True)).encode('utf-8')).hexdigest()[:16]
+            alerts_today.append({'title': f"New external destination: {item.get('dst_ip','?')}", 'data': item, 'id': f"{day}-new_external_destination-{h}"})
         for d in candidates.get('new_domains', []) or []:
-            alerts.append({'kind': 'new_domain', 'title': f"New domain: {d}", 'data': {'domain': d}})
+            h = hashlib.sha256(('new_domain|' + str(d)).encode('utf-8')).hexdigest()[:16]
+            alerts_today.append({'title': f"New domain: {d}", 'data': {'domain': d}, 'id': f"{day}-new_domain-{h}"})
         for item in candidates.get('new_watch_tuples', []) or []:
-            alerts.append({'kind': 'new_watch_tuple', 'title': f"New watch tuple: {item.get('src_ip','?')} → {item.get('dst_ip','?')}:{item.get('dst_port','?')}", 'data': item})
+            h = hashlib.sha256(('new_watch_tuple|' + json.dumps(item, sort_keys=True)).encode('utf-8')).hexdigest()[:16]
+            alerts_today.append({'title': f"New watch tuple: {item.get('src_ip','?')} → {item.get('dst_ip','?')}:{item.get('dst_port','?')}", 'data': item, 'id': f"{day}-new_watch_tuple-{h}"})
         for b in candidates.get('rita_beacons', []) or []:
-            alerts.append({'kind': 'rita_beacon', 'title': f"RITA beacon candidate: {b.get('src_ip','?')} → {b.get('dst_ip','?')}", 'data': b})
+            h = hashlib.sha256(('rita_beacon|' + json.dumps(b, sort_keys=True)).encode('utf-8')).hexdigest()[:16]
+            alerts_today.append({'title': f"RITA beacon candidate: {b.get('src_ip','?')} → {b.get('dst_ip','?')}", 'data': b, 'id': f"{day}-rita_beacon-{h}"})
 
-# Stable-ish id for feedback storage.
-for a in alerts:
-    if not a.get('id'):
-        h = hashlib.sha256((a['kind'] + '|' + json.dumps(a['data'], sort_keys=True)).encode('utf-8')).hexdigest()[:16]
-        a['id'] = f"{day}-{h}"
+# Persistent queue: alerts remain until explicitly dismissed (regardless of date).
+queue = {"items": {}}
+try:
+    if os.path.exists(queue_path):
+        queue = json.load(open(queue_path, 'r', encoding='utf-8'))
+        if not isinstance(queue, dict):
+            queue = {"items": {}}
+except Exception:
+    queue = {"items": {}}
 
-# DOM-safe ids: do not use the logical alert id directly in CSS selectors/element ids,
-# because some ids can include characters (e.g. '|') that break querySelector.
+queue.setdefault('items', {})
+if not isinstance(queue['items'], dict):
+    queue['items'] = {}
+
+# Build a fast lookup of dismissed ids (any day): if latest feedback has dismissed=true, remove from queue.
+# We treat the verdict drop-down as the user's final verdict; dismiss is the only thing that removes from dashboard.
+dismissed_any = set()
+try:
+    for d, mp in (feedback_days or {}).items():
+        if not isinstance(mp, dict):
+            continue
+        for aid, rec in mp.items():
+            if isinstance(rec, dict) and bool(rec.get('dismissed')):
+                dismissed_any.add(str(aid))
+except Exception:
+    dismissed_any = set()
+
+# Update queue with today's alerts.
+for a in alerts_today:
+    aid = a['id']
+    if aid in dismissed_any:
+        continue
+    cur = queue['items'].get(aid) or {}
+    if not isinstance(cur, dict):
+        cur = {}
+    cur.setdefault('first_seen_day', day)
+    cur['last_seen_day'] = day
+    cur['title'] = a.get('title')
+    cur['data'] = a.get('data')
+    queue['items'][aid] = cur
+
+# Prune dismissed.
+for aid in list(queue['items'].keys()):
+    if str(aid) in dismissed_any:
+        queue['items'].pop(aid, None)
+
+# Write updated queue.
+os.makedirs(os.path.dirname(queue_path), exist_ok=True)
+with open(queue_path, 'w', encoding='utf-8') as f:
+    json.dump(queue, f, indent=2, sort_keys=True)
+    f.write('\n')
+
+# Alerts to render = all active items in queue.
+alerts = []
+for aid, rec in queue['items'].items():
+    if not isinstance(rec, dict):
+        continue
+    data = rec.get('data') if isinstance(rec.get('data'), dict) else {}
+    alerts.append({
+        'kind': 'queued_alert',
+        'title': rec.get('title') or '(untitled)',
+        'data': data,
+        'id': str(aid),
+        'first_seen_day': rec.get('first_seen_day') or '',
+        'last_seen_day': rec.get('last_seen_day') or '',
+    })
+
+# Stable ordering: most recently seen first.
+alerts.sort(key=lambda a: (a.get('last_seen_day') or '', a.get('first_seen_day') or '', a.get('id') or ''), reverse=True)
+
+# DOM-safe ids.
 for a in alerts:
     a['dom_id'] = hashlib.sha256((a['id']).encode('utf-8')).hexdigest()[:16]
 
@@ -314,8 +391,8 @@ body.append('</details>')
 body.append('</div>')
 
 body.append('<div class="card">')
-body.append("<h2>Today\'s digest alerts (for review)</h2>")
-body.append('<div class="muted">Add comments and optionally dismiss alerts once you\'ve reviewed them. (Feedback is saved server-side.)</div>')
+body.append("<h2>Active alerts (remain until dismissed)</h2>")
+body.append('<div class="muted">This is a persistent review queue. Alerts stay here across days until you explicitly dismiss them. The verdict drop-down is treated as your final verdict.</div>')
 
 if not alerts:
     body.append('<div class="muted">No candidates found yet. This will populate after the 8pm daily run writes <code>output/state/YYYY-MM-DD.candidates.json</code>.</div>')
@@ -351,7 +428,12 @@ else:
         for b in badges[:4]:
             pills.append(f'<div class="pill">{html.escape(b)}</div>')
 
-        body.append(f'<div class="row">{"".join(pills)}<div class="small muted">id: <code>{aid}</code></div></div>')
+        meta_bits = [f"id: <code>{aid}</code>"]
+        if a.get('first_seen_day'):
+            meta_bits.append(f"first_seen: <code>{html.escape(str(a.get('first_seen_day')))}</code>")
+        if a.get('last_seen_day'):
+            meta_bits.append(f"last_seen: <code>{html.escape(str(a.get('last_seen_day')))}</code>")
+        body.append(f'<div class="row">{"".join(pills)}<div class="small muted">{" · ".join(meta_bits)}</div></div>')
         body.append(f'<h3 style="margin:10px 0">{html.escape(a["title"])}</h3>')
 
         # Plain-language evidence summary (above the raw evidence dropdown)
@@ -395,19 +477,33 @@ else:
         body.append('</details>')
 
         body.append('<div class="row" style="align-items:center;margin-top:10px">')
-        # Initial verdict selection: prefer digest item's suggested verdict if present.
-        digest_verdict = ''
-        try:
-            digest_verdict = (a.get('data') or {}).get('verdict') if isinstance(a.get('data'), dict) else ''
-        except Exception:
-            digest_verdict = ''
+        # Verdict drop-down is treated as the user's final verdict.
+        # Prefer latest saved feedback verdict (any day), else fall back to digest suggestion.
         vv = 'unsure'
-        if str(digest_verdict).lower() in ('likely_benign', 'benign'):
-            vv = 'benign'
-        elif str(digest_verdict).lower() in ('needs_review', 'review'):
-            vv = 'review'
-        elif str(digest_verdict).lower() in ('suspicious', 'malicious'):
-            vv = 'suspicious'
+        try:
+            _prev_day, _prev = latest_feedback(alert_id)
+            prev_verdict = (_prev or {}).get('verdict') if isinstance(_prev, dict) else ''
+            if str(prev_verdict).lower() in ('benign', 'likely benign', 'likely_benign'):
+                vv = 'benign'
+            elif str(prev_verdict).lower() in ('review', 'needs review', 'needs_review'):
+                vv = 'review'
+            elif str(prev_verdict).lower() in ('suspicious', 'malicious'):
+                vv = 'suspicious'
+        except Exception:
+            vv = 'unsure'
+
+        if vv == 'unsure':
+            digest_verdict = ''
+            try:
+                digest_verdict = (a.get('data') or {}).get('verdict') if isinstance(a.get('data'), dict) else ''
+            except Exception:
+                digest_verdict = ''
+            if str(digest_verdict).lower() in ('likely_benign', 'benign'):
+                vv = 'benign'
+            elif str(digest_verdict).lower() in ('needs_review', 'review'):
+                vv = 'review'
+            elif str(digest_verdict).lower() in ('suspicious', 'malicious'):
+                vv = 'suspicious'
 
         def opt(val, label):
             sel = ' selected' if vv == val else ''
@@ -432,6 +528,48 @@ else:
                 prev_day, prev = latest_feedback(alert_id)
                 if isinstance(prev, dict) and (prev.get('note') or '').strip():
                     draft_note += f"Prev note ({prev_day}): {prev.get('note').strip()}\n"
+
+                # Factor in comments from dismissed alerts of similar nature (any day).
+                try:
+                    sim = []
+                    kind_prefix = ''
+                    if isinstance(a.get('data'), dict) and (a.get('data') or {}).get('kind'):
+                        kind_prefix = str((a.get('data') or {}).get('kind'))
+                    if not kind_prefix:
+                        # fall back to id prefix like rita_beacon|...
+                        kind_prefix = str(alert_id).split('|', 1)[0]
+
+                    for _d, mp in (feedback_days or {}).items():
+                        if not isinstance(mp, dict):
+                            continue
+                        for _aid, _rec in mp.items():
+                            if len(sim) >= 2:
+                                break
+                            if not isinstance(_rec, dict):
+                                continue
+                            if not bool(_rec.get('dismissed')):
+                                continue
+                            note = str(_rec.get('note') or '').strip()
+                            if not note:
+                                continue
+                            _aid_s = str(_aid)
+                            if not _aid_s.startswith(kind_prefix + '|') and _aid_s.split('|', 1)[0] != kind_prefix:
+                                continue
+
+                            # Similarity heuristics
+                            same_src = src_ip and (f"|{src_ip}|" in _aid_s)
+                            same_dst = dst_ip and (_aid_s.endswith(f"|{dst_ip}") or f"|{dst_ip}" in _aid_s)
+                            ntpish = (domain and domain.endswith('.pool.ntp.org')) and ('ntp' in note.lower())
+
+                            if same_src or same_dst or ntpish:
+                                sim.append(note)
+                        if len(sim) >= 2:
+                            break
+
+                    if sim:
+                        draft_note += "Similar dismissed notes:\n" + "\n".join([f"- {x}" for x in sim]) + "\n"
+                except Exception:
+                    pass
 
                 # Heuristics based on evidence
                 if domain and domain.endswith('.pool.ntp.org'):
