@@ -241,8 +241,9 @@ async function hydrate(){
   const server = await apiGet();
   const local = loadLocal();
 
-  // Prefer server state when available; else local.
-  const store = (server !== null) ? server : local;
+  // Merge: always include local fallback entries, but let server override when it has a record.
+  // This prevents "saved locally" dismissals from reappearing when the API later becomes available.
+  const store = (server !== null) ? ({...local, ...server}) : local;
 
   for (const [alertId, v] of Object.entries(store)){
     // Find the card that matches this logical id.
