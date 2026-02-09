@@ -308,6 +308,43 @@ else:
 
         body.append(f'<div class="row">{"".join(pills)}<div class="small muted">id: <code>{aid}</code></div></div>')
         body.append(f'<h3 style="margin:10px 0">{html.escape(a["title"])}</h3>')
+
+        # Plain-language evidence summary (above the raw evidence dropdown)
+        ev = a.get('data') if isinstance(a.get('data'), dict) else {}
+        evidence = (ev.get('evidence') or {}) if isinstance(ev, dict) else {}
+        src_ip = evidence.get('src_ip') or ''
+        src_name = evidence.get('src_name') or ''
+        dst_ip = evidence.get('dst_ip') or ''
+        domain = evidence.get('domain') or ''
+        rdns = evidence.get('rdns') or ''
+        notes = evidence.get('notes') or []
+        novelty = next((n for n in notes if isinstance(n, str) and n.startswith('novelty=')), '')
+        ja4 = next((n for n in notes if isinstance(n, str) and n.startswith('ja4_') or (isinstance(n,str) and n.startswith('ja4'))), '')
+
+        ev_lines = []
+        if src_ip or dst_ip:
+            left = f"{src_name} ({src_ip})" if src_name and src_ip else (src_ip or src_name)
+            right = dst_ip
+            if domain:
+                right += f" via DNS {domain}"
+            elif rdns:
+                right += f" (rDNS {rdns})"
+            ev_lines.append(f"Traffic observed: {left} → {right}.".strip())
+        if novelty:
+            ev_lines.append(f"Novelty: {novelty.replace('novelty=','')}." )
+        if ja4:
+            ev_lines.append(f"TLS fingerprint: {ja4}." )
+
+        # Suricata summary cards store evidence as notes without src/dst.
+        if not ev_lines and isinstance(ev.get('evidence'), dict):
+            pass
+        if not ev_lines and isinstance(ev.get('evidence'), dict) and isinstance(ev.get('evidence',{}).get('notes'), list):
+            # fallback for summary cards
+            ev_lines.append("Evidence: derived from Suricata/Zeek artifacts; see raw evidence for details.")
+
+        if ev_lines:
+            body.append('<div class="muted" style="margin-top:6px">' + html.escape(' '.join(ev_lines)) + '</div>')
+
         body.append('<details><summary>evidence (raw)</summary>')
         body.append('<pre>' + html.escape(json.dumps(a['data'], indent=2, sort_keys=True)) + '</pre>')
         body.append('</details>')
