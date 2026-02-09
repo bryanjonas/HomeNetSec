@@ -68,6 +68,13 @@ if [[ ! -f "$REPORT_PATH" ]]; then
   exit 2
 fi
 
+# Ensure enrichment host IP is set so digest can label enrichment-generated DNS lookups.
+# If not explicitly configured, auto-detect the first global IPv4 on this host.
+if [[ -z "${HOMENETSEC_ENRICHMENT_HOST_IP:-}" ]]; then
+  HOMENETSEC_ENRICHMENT_HOST_IP=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)
+  export HOMENETSEC_ENRICHMENT_HOST_IP
+fi
+
 # Build digest JSON from candidates + evidence (writes to $WORKDIR/state/YYYY-MM-DD.digest.json)
 ( cd "$ROOT_DIR" && HOMENETSEC_WORKDIR="$WORKDIR" ./scripts/triage_digest.py --day "$TODAY_ET" --workdir "$WORKDIR" ) || \
   echo "[$(ts)] [homenetsec] WARN: digest triage failed"
