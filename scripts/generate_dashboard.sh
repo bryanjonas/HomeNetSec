@@ -520,67 +520,102 @@ else:
         body.append('</div>')
 
         # Draft comment text (only used if user hasn't saved a note yet today).
+        # Requirements:
+        # - no "test" filler
+        # - drafted text should explain the observation
+        # - permissible to write "Unable to draft comments."
         draft_note = ""
+
+        def _is_useless_note(s: str) -> bool:
+            s2 = (s or '').strip().lower()
+            return (not s2) or s2 in ('test', 'testing', 'tbd', 'todo', 'n/a') or len(s2) < 6
+
         try:
             todays = feedback_for_day.get(alert_id) if isinstance(feedback_for_day, dict) else None
             if not (isinstance(todays, dict) and (todays.get('note') or '').strip()):
-                prev_day, prev = latest_feedback(alert_id)
-                if isinstance(prev, dict) and (prev.get('note') or '').strip():
-                    draft_note += f"Prev note ({prev_day}): {prev.get('note').strip()}\n"
+                # 1) Primary explanation based on evidence
+                expl = []
+                kind_label = (a.get('data') or {}).get('kind') if isinstance(a.get('data'), dict) else a.get('kind')
+                left = f"{src_name} ({src_ip})" if src_name and src_ip else (src_ip or src_name)
+                right = dst_ip or ''
+                if dst_port:
+                    right += f":{dst_port}"
+                if domain:
+                    right += f" (DNS: {domain})"
+                elif rdns:
+                    right += f" (rDNS: {rdns})"
 
-                # Factor in comments from dismissed alerts of similar nature (any day).
+                if left or right:
+                    expl.append(f"Observation: {left} → {right}.".strip())
+
+                if kind_label == 'rita_beacon':
+                    # pull a couple useful notes
+                    bpc = next((n for n in (notes or []) if isinstance(n, str) and 'bytes_per_conn' in n), '')
+                    interval = ''
+                    try:
+                        interval = str((a.get('data') or {}).get('why_flagged') or '')
+                    except Exception:
+                        interval = ''
+                    extra = []
+                    if novelty:
+                        extra.append("new for this device")
+                    if bpc:
+                        extra.append(bpc)
+                    if interval:
+                        extra.append(interval)
+                    if extra:
+                        expl.append("Why flagged: " + "; ".join(extra) + ".")
+
+                # quick benign-ish heuristics
+                if domain and domain.endswith('.pool.ntp.org'):
+                    expl.append("Most likely NTP pool traffic (routine time sync).")
+                if dst_ip and str(dst_ip).startswith('162.159.'):
+                    expl.append("Destination is in Cloudflare space; could still be normal (NTP/CDN), but confirm expected.")
+
+                # 2) Incorporate useful context from dismissed similar alerts (any day)
                 try:
-                    sim = []
+                    sim_notes = []
                     kind_prefix = ''
                     if isinstance(a.get('data'), dict) and (a.get('data') or {}).get('kind'):
                         kind_prefix = str((a.get('data') or {}).get('kind'))
                     if not kind_prefix:
-                        # fall back to id prefix like rita_beacon|...
                         kind_prefix = str(alert_id).split('|', 1)[0]
 
                     for _d, mp in (feedback_days or {}).items():
                         if not isinstance(mp, dict):
                             continue
                         for _aid, _rec in mp.items():
-                            if len(sim) >= 2:
+                            if len(sim_notes) >= 2:
                                 break
-                            if not isinstance(_rec, dict):
-                                continue
-                            if not bool(_rec.get('dismissed')):
+                            if not isinstance(_rec, dict) or not bool(_rec.get('dismissed')):
                                 continue
                             note = str(_rec.get('note') or '').strip()
-                            if not note:
+                            if _is_useless_note(note):
                                 continue
+
                             _aid_s = str(_aid)
                             if not _aid_s.startswith(kind_prefix + '|') and _aid_s.split('|', 1)[0] != kind_prefix:
                                 continue
 
-                            # Similarity heuristics
                             same_src = src_ip and (f"|{src_ip}|" in _aid_s)
                             same_dst = dst_ip and (_aid_s.endswith(f"|{dst_ip}") or f"|{dst_ip}" in _aid_s)
                             ntpish = (domain and domain.endswith('.pool.ntp.org')) and ('ntp' in note.lower())
-
                             if same_src or same_dst or ntpish:
-                                sim.append(note)
-                        if len(sim) >= 2:
+                                sim_notes.append(note)
+                        if len(sim_notes) >= 2:
                             break
 
-                    if sim:
-                        draft_note += "Similar dismissed notes:\n" + "\n".join([f"- {x}" for x in sim]) + "\n"
+                    if sim_notes:
+                        expl.append("Related prior dismissals (context): " + " | ".join(sim_notes))
                 except Exception:
                     pass
 
-                # Heuristics based on evidence
-                if domain and domain.endswith('.pool.ntp.org'):
-                    draft_note += "Looks like NTP pool traffic. Likely benign.\n"
-                if dst_ip and str(dst_ip).startswith('162.159.'):
-                    draft_note += "Destination is Cloudflare (162.159.x.x). Could be NTP/DoH/CDN; confirm expected for this device.\n"
-                if novelty:
-                    draft_note += "Marking as new-for-device; if expected, dismiss.\n"
-                if ja4:
-                    draft_note += "JA4 present; if unexpected for this device, worth deeper review.\n"
+                draft_note = "\n".join([x for x in expl if x and not _is_useless_note(x)])
+
+                if not draft_note.strip():
+                    draft_note = "Unable to draft comments."
         except Exception:
-            pass
+            draft_note = "Unable to draft comments."
 
         body.append(f'<div style="margin-top:10px"><label>Comment / context:<br><textarea id="note-{did}" placeholder="(drafted when possible)">{html.escape(draft_note)}</textarea></label></div>')
 
