@@ -141,20 +141,65 @@ hr{border:none;border-top:1px solid #eee;margin:16px 0}
 js = """
 const DAY = document.body.dataset.day;
 const STORE_KEY = `homenetsec-feedback:${DAY}`;
-function loadStore(){ try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch(e){ return {}; } }
-function saveStore(obj){ localStorage.setItem(STORE_KEY, JSON.stringify(obj)); }
-function onSave(alertId){
-  const store = loadStore();
+
+function loadLocal(){ try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch(e){ return {}; } }
+function saveLocal(obj){ localStorage.setItem(STORE_KEY, JSON.stringify(obj)); }
+
+async function apiGet(){
+  try {
+    const r = await fetch(`/api/feedback?day=${encodeURIComponent(DAY)}`, { cache: 'no-store' });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j.feedback || {};
+  } catch(e){
+    return null;
+  }
+}
+
+async function apiPutOne(alertId, rec){
+  try {
+    const r = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ day: DAY, alert_id: alertId, ...rec })
+    });
+    return r.ok;
+  } catch(e){
+    return false;
+  }
+}
+
+function setStatus(alertId, msg){
+  const el = document.querySelector(`#status-${alertId}`);
+  if (el) el.textContent = msg;
+}
+
+async function onSave(alertId){
   const note = document.querySelector(`#note-${alertId}`).value;
   const verdict = document.querySelector(`#verdict-${alertId}`).value;
   const action = document.querySelector(`#action-${alertId}`).value;
   const actionValue = document.querySelector(`#actionval-${alertId}`).value;
-  store[alertId] = { updated_at: new Date().toISOString(), verdict, note, action, action_value: actionValue };
-  saveStore(store);
-  document.querySelector(`#status-${alertId}`).textContent = 'saved locally';
+
+  const rec = { updated_at: new Date().toISOString(), verdict, note, action, action_value: actionValue };
+
+  // Always save locally as a fallback.
+  const store = loadLocal();
+  store[alertId] = rec;
+  saveLocal(store);
+
+  // Best-effort server save.
+  setStatus(alertId, 'saving…');
+  const ok = await apiPutOne(alertId, rec);
+  setStatus(alertId, ok ? 'saved (server + local)' : 'saved locally (server unavailable)');
 }
-function hydrate(){
-  const store = loadStore();
+
+async function hydrate(){
+  const server = await apiGet();
+  const local = loadLocal();
+
+  // Prefer server state when available; else local.
+  const store = (server !== null) ? server : local;
+
   for (const [alertId, v] of Object.entries(store)){
     const noteEl = document.querySelector(`#note-${alertId}`);
     if (!noteEl) continue;
@@ -162,11 +207,13 @@ function hydrate(){
     document.querySelector(`#verdict-${alertId}`).value = v.verdict || 'unsure';
     document.querySelector(`#action-${alertId}`).value = v.action || '';
     document.querySelector(`#actionval-${alertId}`).value = v.action_value || '';
-    document.querySelector(`#status-${alertId}`).textContent = 'saved locally';
+    setStatus(alertId, (server !== null) ? 'loaded from server' : 'loaded from local');
   }
 }
-function exportFeedback(){
-  const store = loadStore();
+
+async function exportFeedback(){
+  const server = await apiGet();
+  const store = (server !== null) ? server : loadLocal();
   const blob = new Blob([JSON.stringify({day: DAY, feedback: store}, null, 2)], {type: 'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -175,6 +222,7 @@ function exportFeedback(){
   a.click();
   URL.revokeObjectURL(url);
 }
+
 window.addEventListener('DOMContentLoaded', hydrate);
 window.exportFeedback = exportFeedback;
 window.onSave = onSave;

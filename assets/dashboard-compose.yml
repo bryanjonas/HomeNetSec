@@ -7,12 +7,31 @@
 # - Provide binds via assets/.env (NOT committed). Commit assets/.env.example instead.
 
 services:
+  homenetsec_dashboard_api:
+    image: python:3.12-alpine
+    container_name: homenetsec_dashboard_api
+    restart: unless-stopped
+    environment:
+      - HOMENETSEC_STATE_DIR=/state
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ../output/state:/state
+      - ./dashboard-api:/app:ro
+    working_dir: /app
+    entrypoint: ["/bin/sh", "-lc"]
+    command: >
+      'pip install --no-cache-dir flask gunicorn >/dev/null &&
+       exec gunicorn -w 1 -b 0.0.0.0:8000 app:app'
+
   homenetsec_dashboard:
     image: nginx:alpine
     container_name: homenetsec_dashboard
     restart: unless-stopped
+    depends_on:
+      - homenetsec_dashboard_api
     volumes:
       - ../output/www:/usr/share/nginx/html:ro
+      - ./dashboard-nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "${HOMENETSEC_LAN_BIND_IP:?set in assets/.env}:${HOMENETSEC_DASHBOARD_PORT:-8088}:80"
       - "${HOMENETSEC_TS_BIND_IP:?set in assets/.env}:${HOMENETSEC_DASHBOARD_PORT:-8088}:80"
