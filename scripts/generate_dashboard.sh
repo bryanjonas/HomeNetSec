@@ -192,7 +192,8 @@ async function onSave(domId){
   const action = document.querySelector(`#action-${domId}`).value;
   const actionValue = document.querySelector(`#actionval-${domId}`).value;
 
-  const rec = { updated_at: new Date().toISOString(), verdict, note, action, action_value: actionValue };
+  const dismissed = document.querySelector(`#dismiss-${domId}`).checked;
+  const rec = { updated_at: new Date().toISOString(), verdict, note, dismissed };
 
   // Always save locally as a fallback (keyed by logical alert id).
   const store = loadLocal();
@@ -202,7 +203,13 @@ async function onSave(domId){
   // Best-effort server save.
   setStatus(domId, 'saving…');
   const ok = await apiPutOne(alertId, rec);
-  setStatus(domId, ok ? 'saved (server + local)' : 'saved locally (server unavailable)');
+  setStatus(domId, ok ? 'saved' : 'saved locally (server unavailable)');
+
+  // Hide on dismiss.
+  if (dismissed) {
+    const card = document.querySelector(`#card-${domId}`);
+    if (card) card.style.display = 'none';
+  }
 }
 
 async function hydrate(){
@@ -223,26 +230,19 @@ async function hydrate(){
     if (!noteEl) continue;
     document.querySelector(`#note-${domId}`).value = v.note || '';
     document.querySelector(`#verdict-${domId}`).value = v.verdict || 'unsure';
-    document.querySelector(`#action-${domId}`).value = v.action || '';
-    document.querySelector(`#actionval-${domId}`).value = v.action_value || '';
-    setStatus(domId, (server !== null) ? 'loaded from server' : 'loaded from local');
+    document.querySelector(`#dismiss-${domId}`).checked = !!v.dismissed;
+    document.querySelector(`#note-${domId}`).value = v.note || '';
+    document.querySelector(`#verdict-${domId}`).value = v.verdict || 'unsure';
+
+    if (v.dismissed) {
+      card.style.display = 'none';
+    }
+
+    setStatus(domId, (server !== null) ? 'loaded' : 'loaded from local');
   }
 }
 
-async function exportFeedback(){
-  const server = await apiGet();
-  const store = (server !== null) ? server : loadLocal();
-  const blob = new Blob([JSON.stringify({day: DAY, feedback: store}, null, 2)], {type: 'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `homenetsec-feedback-${DAY}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 window.addEventListener('DOMContentLoaded', hydrate);
-window.exportFeedback = exportFeedback;
 window.onSave = onSave;
 """
 
@@ -270,8 +270,7 @@ body.append('</div>')
 
 body.append('<div class="card">')
 body.append("<h2>Today\'s digest alerts (for review)</h2>")
-body.append('<div class="muted">Feedback is stored in your browser (localStorage) for now; use “Export feedback” to share/apply.</div>')
-body.append('<p><button onclick="exportFeedback()">Export feedback JSON</button></p>')
+body.append('<div class="muted">Add comments and optionally dismiss alerts once you\'ve reviewed them. (Feedback is saved server-side.)</div>')
 
 if not alerts:
     body.append('<div class="muted">No candidates found yet. This will populate after the 8pm daily run writes <code>output/state/YYYY-MM-DD.candidates.json</code>.</div>')
@@ -298,15 +297,8 @@ else:
 
         body.append(f'<div style="margin-top:10px"><label>Comment / context:<br><textarea id="note-{did}" placeholder="e.g. Doorbell doing NTP lookups (pool.ntp.org)."></textarea></label></div>')
 
-        body.append('<div class="row" style="margin-top:10px">')
-        body.append(f'<label>Suggest suppress (allowlist) action: <select id="action-{did}">'
-                    '<option value="">(none)</option>'
-                    '<option value="domain">domain</option>'
-                    '<option value="domain_suffix">domain suffix</option>'
-                    '<option value="dst_ip">destination IP</option>'
-                    '<option value="rdns_suffix">rDNS suffix</option>'
-                    '</select></label>')
-        body.append(f'<label>Value: <input id="actionval-{did}" size="32" placeholder="e.g. pool.ntp.org or .ntp.org"/></label>')
+        body.append('<div class="row" style="align-items:center;margin-top:10px">')
+        body.append(f'<label><input type="checkbox" id="dismiss-{did}"/> Dismiss (hide this alert)</label>')
         body.append(f'<button onclick="onSave(\'{did}\')">Save</button>')
         body.append('</div>')
         body.append('</div>')

@@ -67,8 +67,8 @@ def put_feedback():
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "verdict": data.get("verdict") or "unsure",
             "note": data.get("note") or "",
-            "action": data.get("action") or "",
-            "action_value": data.get("action_value") or "",
+            # UI allows dismissing an alert; dismissed alerts should not render on the main page.
+            "dismissed": bool(data.get("dismissed")) if data.get("dismissed") is not None else False,
         }
         db["days"][day][alert_id] = rec
     else:
