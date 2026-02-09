@@ -83,7 +83,7 @@ services:
          -S /var/lib/suricata/rules/suricata.rules \
          --set outputs.1.eve-log.enabled=yes \
          --set outputs.1.eve-log.filename="$${EVE_NAME}" \
-         --set outputs.1.eve-log.types.0.alert.enabled=no \
+         --set outputs.1.eve-log.types.0.alert.enabled=yes \
          --set outputs.1.eve-log.types.1.dns.enabled=no \
          --set outputs.1.eve-log.types.2.http.enabled=no \
          --set outputs.1.eve-log.types.3.tls.enabled=yes;
