@@ -303,4 +303,23 @@ with open(out_path, 'w', encoding='utf-8') as f:
     f.write('\n'.join(body) + '\n')
 PY
 
+# Compatibility: old links pointed at /daily/YYYY-MM-DD.html. Keep those working.
+mkdir -p "$WWW_DIR/daily"
+cat >"$WWW_DIR/daily/index.html" <<'HTML'
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=/">
+<link rel="canonical" href="/">
+<title>HomeNetSec</title>
+<p>Redirecting to <a href="/">/</a>…</p>
+HTML
+cat >"$WWW_DIR/daily/${TODAY_ET}.html" <<'HTML'
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=/">
+<link rel="canonical" href="/">
+<title>HomeNetSec</title>
+<p>Redirecting to <a href="/">/</a>…</p>
+HTML
+
 echo "[$(TS)] [homenetsec] dashboard updated under: $WWW_DIR"
