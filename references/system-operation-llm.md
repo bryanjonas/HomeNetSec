@@ -26,7 +26,7 @@ Therefore, HomeNetSec uses **SFTP** (not `ssh <cmd>`), so it can operate with a 
 
 ### 1.2 DNS telemetry (resolver context)
 - DNS telemetry is pulled from **AdGuard Home** via its HTTP API.
-- Evidence enrichment should also attempt to map `src_ip` → **client name** using the DNS server’s client list (when available), so digests read like “Kitchen-iPad (192.168.1.X)” instead of just an IP.
+- Evidence enrichment should also attempt to map `src_ip` → **client name** using the DNS server’s client list (when available), so digests read like “Kitchen-iPad (RFC1918_IP)” instead of just an IP.
 - Credentials are not in the repo; they live in a local env file (default documented in README):
   - `~/.openclaw/credentials/adguard.env`
 
@@ -60,30 +60,43 @@ Repo policy: runtime outputs are not committed.
 
 ---
 
-## 3) The two execution loops
+## 3) Scheduling model (pipelines can run separately)
 
-HomeNetSec has two main loops:
+HomeNetSec is intentionally split so the **download/processing pipeline** can be scheduled separately from the **analysis pipeline**.
 
-### 3.1 Hourly loop (ingest + process)
+### 3.1 Download + processing pipeline (PCAP ingest → merge → Suricata + Zeek)
 Entry point:
 - `scripts/hourly_ingest_merge_process.sh`
 
 Goal:
 - incrementally ingest new PCAP segments, merge them into a single PCAP batch, and run Suricata+Zeek on the merged batch.
 
-### 3.2 Daily 8pm loop (reporting)
+Typical cadence:
+- hourly (top of hour)
+
+### 3.2 Analysis + dashboard pipeline (RITA/reporting → triage digest → dashboard)
+Entry points:
+- `scripts/run_daily.sh` (reporting layer)
+- `scripts/triage_digest.py` (deterministic digest enrichment + suppression)
+- `scripts/generate_dashboard.sh` (static dashboard generation)
+
+Goal:
+- update baselines/candidates, run RITA over flattened Zeek logs, enrich into a deterministic triage digest, and refresh the dashboard.
+
+Typical cadence:
+- 2×/day (e.g., morning/evening), or hourly if you want near-real-time dashboard updates
+
+Important property:
+- This pipeline does *not* need to pull PCAPs and does *not* rerun Zeek/Suricata; it consumes outputs produced by the download/processing pipeline.
+
+### 3.3 Optional delivery wrapper (Telegram)
 Entry point:
 - `scripts/run_and_send_openclaw.sh`
 
 Goal:
-- run a catch-up hourly ingest pass
-- run the reporting layer (RITA + baselines + candidate detection + report)
-- run triage digest enrichment (AdGuard client names, DNS correlation, novelty)
-- include **Suricata Priority 1–2** signatures as individual digest items (Priority 3 is considered too noisy by default)
-- update the dashboard
-- send a Telegram message with a link to the dashboard
+- run analysis steps and optionally send a Telegram message with a dashboard link.
 
-The daily run intentionally does *not* re-run Zeek/Suricata over an entire day; those are produced incrementally by the hourly merged-PCAP loop.
+Delivery is intentionally separable: you can run analysis hourly and choose when/if to send messages.
 
 ---
 
@@ -147,18 +160,19 @@ For the merged PCAP:
 
 ---
 
-## 5) Reporting layer (8pm)
+## 5) Reporting layer (schedule independently from ingest)
 
 Entry points:
-- `scripts/run_and_send_openclaw.sh`
 - `scripts/run_daily.sh`
+- (optional wrapper) `scripts/run_and_send_openclaw.sh`
 
-At 8pm the system:
-1) runs hourly ingest once (catch-up)
-2) runs `run_daily.sh` in report-only mode:
+The reporting layer:
+1) runs `run_daily.sh` in report-only mode:
    - `SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0`
-3) updates baseline DB and anomaly candidates
-4) writes daily report text: `output/reports/YYYY-MM-DD.txt`
+2) updates baseline DB and anomaly candidates
+3) writes daily report text: `output/reports/YYYY-MM-DD.txt`
+
+This layer can run hourly or 2×/day. It assumes Zeek logs have already been produced by the download/processing pipeline.
 
 Candidate detection:
 - `scripts/detect_candidates.py` (baseline-driven)
@@ -180,16 +194,19 @@ Generator:
 
 The root page (`/`) is a single-page dashboard showing:
 - hourly ingest status
-- **today’s digest alerts** (from `state/YYYY-MM-DD.candidates.json`)
-- user feedback controls per alert
-- optional raw daily roll-up text
+- **active alerts queue** (alerts remain until dismissed; not day-scoped)
+- per-alert feedback (verdict + comment + dismiss)
+- raw daily roll-up text
 
-Feedback today:
-- feedback is stored locally in the browser (localStorage)
-- user can export a JSON blob
+Feedback persistence:
+- feedback is persisted server-side via the dashboard API into:
+  - `output/state/feedback.json` (not committed)
+- the dashboard hydrates saved verdict/comment/dismiss state on refresh.
 
-Future (not required but planned):
-- add a small LAN/Tailscale-only API to persist feedback server-side and apply allowlist suggestions.
+Alert queue:
+- active alert queue is stored in:
+  - `output/state/alerts_queue.json` (not committed)
+- it is updated whenever the dashboard is regenerated.
 
 ---
 

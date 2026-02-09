@@ -13,13 +13,21 @@ The design is intentionally modular so you can swap out **how PCAPs arrive** (OP
 
 ## Current design (important)
 
-HomeNetSec has two loops:
+HomeNetSec is split into **two pipelines** that can be scheduled independently:
 
-### 1) Hourly ingest + processing (top of every hour)
+1) **Download + processing pipeline** (PCAP ingest → merge → Suricata + Zeek)
+2) **Analysis + dashboard pipeline** (RITA/reporting → triage digest → dashboard update)
 
-**Goal:** keep analysis incremental and avoid the overhead of spinning up a Zeek container for each tiny PCAP.
+You can also run a **single “full pipeline”** schedule that runs both back-to-back.
 
-The hourly job:
+### A) Download + processing pipeline (recommended cadence: hourly)
+
+Entry point:
+- `scripts/hourly_ingest_merge_process.sh`
+
+**Goal:** keep PCAP processing incremental and avoid spinning up containers for each tiny PCAP.
+
+What it does:
 1. Downloads **eligible new PCAPs since the last contiguous ingest** (tracked via `output/state/hourly_ingest_state.json`). This state is *gap-safe*: it retains a retry list of missing/failed segments so older uncopied files are still fetched later.
 2. Applies **partial protections**:
    - skips newest `PULL_SKIP_NEWEST_N` remote files (default: 1)
@@ -29,32 +37,36 @@ The hourly job:
 5. Deletes the source PCAP files after a verified merge.
 6. Runs **Suricata + Zeek** on the merged PCAP.
 
-Hourly retention defaults:
+Retention defaults:
 - merged PCAPs: **7 days**
-- Suricata EVE outputs + Zeek logs from hourly merged runs: **30 days**
+- Suricata EVE outputs + Zeek logs from merged runs: **30 days**
 
-### 2) 8pm daily reporting (20:00 ET)
+### B) Analysis + dashboard pipeline (recommended cadence: 2×/day or hourly)
 
-**Goal:** run the reporting/enrichment layer and send a digest.
+This pipeline does **not** pull PCAPs and does **not** rerun Zeek/Suricata. It consumes the Zeek outputs from the download/processing pipeline.
 
-At 8pm the job:
-1. Runs the hourly ingest step once (catch-up).
-2. Runs **RITA + baselines + candidates + report generation**.
-3. Sends the report to Telegram.
+Typical command sequence:
+- `env SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0 ./scripts/run_daily.sh YYYY-MM-DD`
+- `./scripts/triage_digest.py --day YYYY-MM-DD --workdir "$HOMENETSEC_WORKDIR"`
+- `./scripts/generate_dashboard.sh YYYY-MM-DD`
 
-There is **no separate daily Zeek/Suricata re-processing pass** anymore; those are handled by the hourly merged-PCAP pipeline.
+### C) Full pipeline (ingest + analysis + dashboard)
+
+If you want everything updated together, run:
+1) `scripts/hourly_ingest_merge_process.sh`
+2) then the analysis + dashboard pipeline above
 
 ## What this does (high level)
 
-- Hourly: ingest PCAPs → merge → Suricata + Zeek
-- Daily 8pm: RITA + baselines/candidates + DNS stats → report → send
+- Download/processing: PCAP ingest → merge → Suricata + Zeek
+- Analysis/dashboard: RITA + baselines/candidates → triage digest → dashboard
 
 ## Repo / skill layout
 
 - `SKILL.md` — OpenClaw skill metadata + minimal usage notes
 - `scripts/hourly_ingest_merge_process.sh` — hourly ingest (download new pcaps, merge, verify, delete inputs, Suricata+Zeek on merged)
 - `scripts/run_daily.sh` — report generator (RITA + baselines + candidates + report; can optionally run full pull/zeek if enabled)
-- `scripts/run_and_send_openclaw.sh` — OpenClaw wrapper (8pm: run hourly ingest, then run `run_daily.sh` in report-only mode, then send Telegram)
+- `scripts/run_and_send_openclaw.sh` — OpenClaw wrapper (optionally run ingest + analysis, then send Telegram)
 - `scripts/pull_recent_pcaps.sh` — helper: pull last N hours worth of pcaps (kept for debugging)
 - `assets/docker-compose.yml` — Zeek + RITA + Mongo + Suricata stack
 - `assets/rita-config.yaml.example` — example RITA config
@@ -102,7 +114,9 @@ This is used only for summary stats in the report (e.g., top clients, top blocke
 
 HomeNetSec pulls PCAPs using **SFTP** (not remote shell commands), which allows use of locked-down SSH accounts (no interactive shell).
 
-- `OPNSENSE_HOST`
+Required env vars (recommend storing in an uncommitted file like `~/.openclaw/credentials/opnsense.env` and sourcing it in cron):
+
+- `OPNSENSE_HOST` (required)
 - `OPNSENSE_USER`
 - `OPNSENSE_KEY` (path to SSH private key)
 - `OPNSENSE_PCAP_DIR`
@@ -119,9 +133,9 @@ HomeNetSec pulls PCAPs using **SFTP** (not remote shell commands), which allows 
   - `HOURLY_ARTIFACT_RETENTION_DAYS` (default: `30`)
   - `RUN_RETENTION_CLEANUP` (default: `1`)
 
-### Daily report (8pm) controls
+### Reporting/digest controls
 
-`run_and_send_openclaw.sh` runs `run_daily.sh` in *report-only mode* (no daily Zeek/Suricata).
+`run_and_send_openclaw.sh` runs `run_daily.sh` in *report-only mode* (no extra PCAP pull and no extra Zeek/Suricata pass).
 You can override by running `run_daily.sh` directly.
 
 ### Pipeline toggles (used by run_daily.sh)
@@ -147,13 +161,34 @@ export HOMENETSEC_WORKDIR="$PWD/output"
 ./scripts/hourly_ingest_merge_process.sh
 ```
 
-### Daily 8pm report (RITA + baselines + report + send)
+### Analysis pipeline (RITA + triage digest + dashboard)
+
+```bash
+cd HomeNetSec
+export HOMENETSEC_WORKDIR="$PWD/output"
+DAY="$(TZ=America/New_York date +%F)"
+
+# reporting + RITA (does NOT pull pcaps; does NOT run Zeek)
+env SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0 ./scripts/run_daily.sh "$DAY"
+
+# deterministic triage digest enrichment
+./scripts/triage_digest.py --day "$DAY" --workdir "$HOMENETSEC_WORKDIR"
+
+# regenerate dashboard (persistent alert queue + feedback)
+./scripts/generate_dashboard.sh "$DAY"
+```
+
+### Telegram delivery wrapper (optional)
+
+If you want OpenClaw to send a Telegram update, use:
 
 ```bash
 cd HomeNetSec
 export HOMENETSEC_WORKDIR="$PWD/output"
 ./scripts/run_and_send_openclaw.sh
 ```
+
+(Delivery is intentionally separated from analysis; you can run analysis on a schedule and only send messages when desired.)
 
 ### Ad-hoc: generate report for a specific day (report-only)
 
