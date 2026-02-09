@@ -526,6 +526,7 @@ else:
         src_ip = evidence.get('src_ip') or ''
         src_name = evidence.get('src_name') or ''
         dst_ip = evidence.get('dst_ip') or ''
+        dst_port = evidence.get('dst_port') or 0
         domain = evidence.get('domain') or ''
         rdns = evidence.get('rdns') or ''
         notes = evidence.get('notes') or []
