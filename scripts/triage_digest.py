@@ -50,19 +50,98 @@ def now_iso_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def load_feedback(feedback_path: str, day: str) -> dict:
+def load_feedback_db(feedback_path: str) -> dict:
+    """Load feedback.json database.
+
+    Format:
+      {"days": {"YYYY-MM-DD": {"alert_id": {verdict,note,dismissed,updated_at}}}}
+    """
     try:
         db = load_json(feedback_path)
-        return (db.get("days") or {}).get(day, {}) or {}
+        return db if isinstance(db, dict) else {"days": {}}
     except FileNotFoundError:
-        return {}
+        return {"days": {}}
     except Exception:
-        return {}
+        return {"days": {}}
 
 
-def is_dismissed(feedback_for_day: dict, alert_id: str) -> bool:
-    rec = feedback_for_day.get(alert_id) or {}
-    return bool(rec.get("dismissed"))
+def _parse_feedback_ts(s: str | None) -> dt.datetime | None:
+    if not s:
+        return None
+    s = str(s).strip()
+    # Common formats seen:
+    # - 2026-02-09T15:51:49+0000
+    # - 2026-02-09T15:51:49+00:00
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
+        try:
+            return dt.datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    try:
+        # fromisoformat handles +00:00 but not +0000
+        return dt.datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def latest_feedback_record(feedback_db: dict, alert_id: str) -> tuple[str, dict] | tuple[None, None]:
+    """Return (day, record) for the latest feedback entry for an alert_id across all days."""
+    days = feedback_db.get("days") if isinstance(feedback_db, dict) else None
+    if not isinstance(days, dict):
+        return (None, None)
+
+    best_day = None
+    best_rec = None
+    best_ts = None
+    for day, mp in days.items():
+        if not isinstance(mp, dict):
+            continue
+        rec = mp.get(alert_id)
+        if not isinstance(rec, dict):
+            continue
+        ts = _parse_feedback_ts(rec.get("updated_at"))
+        if ts is None:
+            # fall back: treat as very old
+            ts = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+        if best_ts is None or ts > best_ts:
+            best_ts = ts
+            best_day = day
+            best_rec = rec
+
+    return (best_day, best_rec)
+
+
+def is_suppressed(feedback_db: dict, alert_id: str, *, now: dt.datetime, benign_ttl_days: int = 14, dismissed_ttl_days: int = 30) -> bool:
+    """Verdict-based suppression with TTL.
+
+    Rules (initial version):
+    - If latest record has dismissed=true -> suppress for dismissed_ttl_days.
+    - Else if verdict==benign -> suppress for benign_ttl_days.
+
+    (We can expand later to allow per-record TTLs.)
+    """
+    _, rec = latest_feedback_record(feedback_db, alert_id)
+    if not isinstance(rec, dict):
+        return False
+
+    ts = _parse_feedback_ts(rec.get("updated_at"))
+    if ts is None:
+        return False
+
+    # Ensure tz-aware
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+
+    age_days = (now - ts).total_seconds() / 86400.0
+
+    if bool(rec.get("dismissed")):
+        return age_days <= float(dismissed_ttl_days)
+
+    verdict = str(rec.get("verdict") or "").strip().lower()
+    if verdict == "benign":
+        return age_days <= float(benign_ttl_days)
+
+    return False
 
 
 def adguard_login_cookie(url: str, user: str, pw: str) -> str:
@@ -396,7 +475,7 @@ def _suricata_summarize(workdir: str, day: str, src_dst_interest: set[tuple[str,
     }
 
 
-def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str, str], zeek_logs_root: str, enrichment_host_ip: str, workdir: str) -> dict:
+def build_digest(candidates: dict, feedback_db: dict, client_map: dict[str, str], zeek_logs_root: str, enrichment_host_ip: str, workdir: str) -> dict:
     day = candidates.get("day") or ""
     signals = (candidates.get("signals") or {})
 
@@ -431,7 +510,7 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
             continue
 
         alert_id = f"rita_beacon|{src}|{dst}"
-        if is_dismissed(feedback_for_day, alert_id):
+        if is_suppressed(feedback_db, alert_id, now=dt.datetime.now(dt.timezone.utc)):
             continue
 
         src_name = client_map.get(src, "")
@@ -589,7 +668,7 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
         cnt = int(meta.get("count", a.get("count", 0)) or 0)
 
         alert_id = f"suricata_sig|{key}|{day}"
-        if is_dismissed(feedback_for_day, alert_id):
+        if is_suppressed(feedback_db, alert_id, now=dt.datetime.now(dt.timezone.utc)):
             continue
 
         tuples = meta.get("top_tuples") or []
@@ -716,11 +795,11 @@ def main() -> int:
     zeek_root = os.path.join(workdir, "zeek-logs")
 
     candidates = load_json(cand_path)
-    feedback_for_day = load_feedback(feedback_path, day)
+    feedback_db = load_feedback_db(feedback_path)
     client_map = adguard_client_map(args.adguard_env)
 
     enrichment_host_ip = os.environ.get("HOMENETSEC_ENRICHMENT_HOST_IP", "").strip()
-    digest = build_digest(candidates, feedback_for_day, client_map, zeek_root, enrichment_host_ip, workdir)
+    digest = build_digest(candidates, feedback_db, client_map, zeek_root, enrichment_host_ip, workdir)
     save_json_atomic(digest_path, digest)
 
     print(digest_path)

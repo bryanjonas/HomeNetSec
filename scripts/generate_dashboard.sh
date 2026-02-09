@@ -70,19 +70,23 @@ st = json.load(open(status_path, 'r', encoding='utf-8'))
 hourly = st.get('hourly_state') or {}
 day = st.get('today_et') or ''
 
-# Load persisted feedback so dismissed alerts are not even rendered into HTML.
-# (JS still hydrates for comments/verdicts/etc when available.)
+# Load persisted feedback.
+# We use it for:
+# - filtering dismissed alerts out of the rendered HTML
+# - drafting comment text using prior notes/verdicts
 feedback_for_day = {}
+feedback_days = {}
 try:
     fb = json.load(open(feedback_path, 'r', encoding='utf-8'))
     if isinstance(fb, dict):
-        # feedback.json format: {"days": {"YYYY-MM-DD": {"alert_id": {...}}}, ...}
-        days = fb.get('days') if isinstance(fb.get('days'), dict) else {}
-        feedback_for_day = (days.get(day) or {}) if isinstance(days, dict) else {}
+        feedback_days = fb.get('days') if isinstance(fb.get('days'), dict) else {}
+        feedback_for_day = (feedback_days.get(day) or {}) if isinstance(feedback_days, dict) else {}
 except FileNotFoundError:
     feedback_for_day = {}
+    feedback_days = {}
 except Exception:
     feedback_for_day = {}
+    feedback_days = {}
 
 def is_dismissed(alert_id: str) -> bool:
     try:
@@ -90,6 +94,23 @@ def is_dismissed(alert_id: str) -> bool:
         return bool(rec.get('dismissed'))
     except Exception:
         return False
+
+def latest_feedback(alert_id: str):
+    """Return (day, rec) for latest record for this alert across all days."""
+    best_day, best_rec, best_ts = None, None, None
+    for d, mp in (feedback_days or {}).items():
+        if not isinstance(mp, dict):
+            continue
+        rec = mp.get(alert_id)
+        if not isinstance(rec, dict):
+            continue
+        ts = rec.get('updated_at') or ''
+        # timestamps are comparable enough lexicographically in this project (ISO-like)
+        if best_ts is None or str(ts) > str(best_ts):
+            best_ts = ts
+            best_day = d
+            best_rec = rec
+    return best_day, best_rec
 
 # hourly state key drift compatibility
 last_epoch = hourly.get('last_epoch')
@@ -374,11 +395,57 @@ else:
         body.append('</details>')
 
         body.append('<div class="row" style="align-items:center;margin-top:10px">')
-        body.append(f'<label>Verdict: <select id="verdict-{did}"><option value="unsure">unsure</option><option value="benign">likely benign</option><option value="review">needs review</option><option value="suspicious">suspicious</option></select></label>')
+        # Initial verdict selection: prefer digest item's suggested verdict if present.
+        digest_verdict = ''
+        try:
+            digest_verdict = (a.get('data') or {}).get('verdict') if isinstance(a.get('data'), dict) else ''
+        except Exception:
+            digest_verdict = ''
+        vv = 'unsure'
+        if str(digest_verdict).lower() in ('likely_benign', 'benign'):
+            vv = 'benign'
+        elif str(digest_verdict).lower() in ('needs_review', 'review'):
+            vv = 'review'
+        elif str(digest_verdict).lower() in ('suspicious', 'malicious'):
+            vv = 'suspicious'
+
+        def opt(val, label):
+            sel = ' selected' if vv == val else ''
+            return f'<option value="{val}"{sel}>{html.escape(label)}</option>'
+
+        body.append(
+            f'<label>Verdict: <select id="verdict-{did}">'
+            + opt('unsure','unsure')
+            + opt('benign','likely benign')
+            + opt('review','needs review')
+            + opt('suspicious','suspicious')
+            + '</select></label>'
+        )
         body.append(f'<span class="muted small" id="status-{did}"></span>')
         body.append('</div>')
 
-        body.append(f'<div style="margin-top:10px"><label>Comment / context:<br><textarea id="note-{did}" placeholder="e.g. Doorbell doing NTP lookups (pool.ntp.org)."></textarea></label></div>')
+        # Draft comment text (only used if user hasn't saved a note yet today).
+        draft_note = ""
+        try:
+            todays = feedback_for_day.get(alert_id) if isinstance(feedback_for_day, dict) else None
+            if not (isinstance(todays, dict) and (todays.get('note') or '').strip()):
+                prev_day, prev = latest_feedback(alert_id)
+                if isinstance(prev, dict) and (prev.get('note') or '').strip():
+                    draft_note += f"Prev note ({prev_day}): {prev.get('note').strip()}\n"
+
+                # Heuristics based on evidence
+                if domain and domain.endswith('.pool.ntp.org'):
+                    draft_note += "Looks like NTP pool traffic. Likely benign.\n"
+                if dst_ip and str(dst_ip).startswith('162.159.'):
+                    draft_note += "Destination is Cloudflare (162.159.x.x). Could be NTP/DoH/CDN; confirm expected for this device.\n"
+                if novelty:
+                    draft_note += "Marking as new-for-device; if expected, dismiss.\n"
+                if ja4:
+                    draft_note += "JA4 present; if unexpected for this device, worth deeper review.\n"
+        except Exception:
+            pass
+
+        body.append(f'<div style="margin-top:10px"><label>Comment / context:<br><textarea id="note-{did}" placeholder="(drafted when possible)">{html.escape(draft_note)}</textarea></label></div>')
 
         body.append('<div class="row" style="align-items:center;margin-top:10px">')
         body.append(f'<label><input type="checkbox" id="dismiss-{did}"/> Dismiss (hide this alert)</label>')
