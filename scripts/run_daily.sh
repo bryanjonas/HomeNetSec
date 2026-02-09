@@ -30,7 +30,8 @@ JA4DB_PATH="${JA4DB_PATH:-$STATE_DIR/ja4+_db.json}"
 REPORT_PATH="$REPORT_DIR/$DAY.txt"
 
 # OPNsense pull settings
-OPNSENSE_HOST="${OPNSENSE_HOST:-192.168.1.X}"
+# Do not hardcode host-specific IPs; require explicit configuration.
+OPNSENSE_HOST="${OPNSENSE_HOST:?OPNSENSE_HOST must be set (OPNsense host/IP)}"
 OPNSENSE_USER="${OPNSENSE_USER:-openclaw}"
 OPNSENSE_KEY="${OPNSENSE_KEY:-$HOME/.ssh/openclaw-opnsense}"
 OPNSENSE_PCAP_DIR="${OPNSENSE_PCAP_DIR:-/var/log/pcaps}"

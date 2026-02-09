@@ -81,7 +81,7 @@ def adguard_client_map(adguard_env: str | None) -> dict[str, str]:
     """Return {ip_or_id: name} from AdGuard registered clients.
 
     In AdGuard, client objects have fields like:
-      {"name": "Doorbell Camera", "ids": ["192.168.1.X", ...]}
+      {"name": "Doorbell Camera", "ids": ["<client-ip>", ...]}
     """
 
     # Load env file if provided
@@ -344,7 +344,7 @@ def _suricata_summarize(workdir: str, day: str, src_dst_interest: set[tuple[str,
                     dq.append(line.rstrip("\n"))
 
             # Example fast.log line:
-            # 02/09/2026-05:06:30.889307  [**] [1:2260002:1] SURICATA ... [**] [Classification: ...] [Priority: 3] {TCP} 192.168.1.X:53104 -> 204.80.128.1:443
+            # 02/09/2026-05:06:30.889307  [**] [1:2260002:1] ... [Priority: 3] {TCP} <src_ip>:<src_port> -> <dst_ip>:<dst_port>
             re_sig = re.compile(r"\[\*\*\]\s*\[(\d+):(\d+):(\d+)\]\s*([^\[]+?)\s*\[\*\*\]")
             re_prio = re.compile(r"\[Priority:\s*(\d+)\]")
             re_tuple = re.compile(r"\}\s+(\d+\.\d+\.\d+\.\d+):(\d+)\s+->\s+(\d+\.\d+\.\d+\.\d+):(\d+)")
