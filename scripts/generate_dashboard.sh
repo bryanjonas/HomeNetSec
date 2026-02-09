@@ -123,6 +123,11 @@ for a in alerts:
         h = hashlib.sha256((a['kind'] + '|' + json.dumps(a['data'], sort_keys=True)).encode('utf-8')).hexdigest()[:16]
         a['id'] = f"{day}-{h}"
 
+# DOM-safe ids: do not use the logical alert id directly in CSS selectors/element ids,
+# because some ids can include characters (e.g. '|') that break querySelector.
+for a in alerts:
+    a['dom_id'] = hashlib.sha256((a['id']).encode('utf-8')).hexdigest()[:16]
+
 style = """
 body{font-family:system-ui,Arial,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px}
 a{color:#0b5fff;text-decoration:none} a:hover{text-decoration:underline}
@@ -169,28 +174,35 @@ async function apiPutOne(alertId, rec){
   }
 }
 
-function setStatus(alertId, msg){
-  const el = document.querySelector(`#status-${alertId}`);
+function setStatus(domId, msg){
+  const el = document.querySelector(`#status-${domId}`);
   if (el) el.textContent = msg;
 }
 
-async function onSave(alertId){
-  const note = document.querySelector(`#note-${alertId}`).value;
-  const verdict = document.querySelector(`#verdict-${alertId}`).value;
-  const action = document.querySelector(`#action-${alertId}`).value;
-  const actionValue = document.querySelector(`#actionval-${alertId}`).value;
+function logicalIdFromDom(domId){
+  const card = document.querySelector(`#card-${domId}`);
+  return card ? (card.dataset.alertId || '') : '';
+}
+
+async function onSave(domId){
+  const alertId = logicalIdFromDom(domId) || domId;
+
+  const note = document.querySelector(`#note-${domId}`).value;
+  const verdict = document.querySelector(`#verdict-${domId}`).value;
+  const action = document.querySelector(`#action-${domId}`).value;
+  const actionValue = document.querySelector(`#actionval-${domId}`).value;
 
   const rec = { updated_at: new Date().toISOString(), verdict, note, action, action_value: actionValue };
 
-  // Always save locally as a fallback.
+  // Always save locally as a fallback (keyed by logical alert id).
   const store = loadLocal();
   store[alertId] = rec;
   saveLocal(store);
 
   // Best-effort server save.
-  setStatus(alertId, 'saving…');
+  setStatus(domId, 'saving…');
   const ok = await apiPutOne(alertId, rec);
-  setStatus(alertId, ok ? 'saved (server + local)' : 'saved locally (server unavailable)');
+  setStatus(domId, ok ? 'saved (server + local)' : 'saved locally (server unavailable)');
 }
 
 async function hydrate(){
@@ -201,13 +213,19 @@ async function hydrate(){
   const store = (server !== null) ? server : local;
 
   for (const [alertId, v] of Object.entries(store)){
-    const noteEl = document.querySelector(`#note-${alertId}`);
+    // Find the card that matches this logical id.
+    const card = document.querySelector(`[data-alert-id="${CSS.escape(alertId)}"]`);
+    if (!card) continue;
+    const domId = (card.id || '').replace(/^card-/, '');
+    if (!domId) continue;
+
+    const noteEl = document.querySelector(`#note-${domId}`);
     if (!noteEl) continue;
-    document.querySelector(`#note-${alertId}`).value = v.note || '';
-    document.querySelector(`#verdict-${alertId}`).value = v.verdict || 'unsure';
-    document.querySelector(`#action-${alertId}`).value = v.action || '';
-    document.querySelector(`#actionval-${alertId}`).value = v.action_value || '';
-    setStatus(alertId, (server !== null) ? 'loaded from server' : 'loaded from local');
+    document.querySelector(`#note-${domId}`).value = v.note || '';
+    document.querySelector(`#verdict-${domId}`).value = v.verdict || 'unsure';
+    document.querySelector(`#action-${domId}`).value = v.action || '';
+    document.querySelector(`#actionval-${domId}`).value = v.action_value || '';
+    setStatus(domId, (server !== null) ? 'loaded from server' : 'loaded from local');
   }
 }
 
@@ -259,8 +277,14 @@ if not alerts:
     body.append('<div class="muted">No candidates found yet. This will populate after the 8pm daily run writes <code>output/state/YYYY-MM-DD.candidates.json</code>.</div>')
 else:
     for a in alerts:
-        aid = html.escape(a['id'])
+        alert_id = a['id']
+        dom_id = a.get('dom_id') or hashlib.sha256(alert_id.encode('utf-8')).hexdigest()[:16]
+
+        aid = html.escape(alert_id)
+        did = html.escape(dom_id)
+
         body.append('<hr>')
+        body.append(f'<div id="card-{did}" data-alert-id="{aid}">')
         body.append(f'<div class="row"><div class="pill">{html.escape(a["kind"])}</div><div class="small muted">id: <code>{aid}</code></div></div>')
         body.append(f'<h3 style="margin:10px 0">{html.escape(a["title"])}</h3>')
         body.append('<details><summary>evidence (raw)</summary>')
@@ -268,22 +292,23 @@ else:
         body.append('</details>')
 
         body.append('<div class="row" style="align-items:center;margin-top:10px">')
-        body.append(f'<label>Verdict: <select id="verdict-{aid}"><option value="unsure">unsure</option><option value="benign">likely benign</option><option value="review">needs review</option><option value="suspicious">suspicious</option></select></label>')
-        body.append(f'<span class="muted small" id="status-{aid}"></span>')
+        body.append(f'<label>Verdict: <select id="verdict-{did}"><option value="unsure">unsure</option><option value="benign">likely benign</option><option value="review">needs review</option><option value="suspicious">suspicious</option></select></label>')
+        body.append(f'<span class="muted small" id="status-{did}"></span>')
         body.append('</div>')
 
-        body.append(f'<div style="margin-top:10px"><label>Comment / context:<br><textarea id="note-{aid}" placeholder="e.g. Doorbell doing NTP lookups (pool.ntp.org)."></textarea></label></div>')
+        body.append(f'<div style="margin-top:10px"><label>Comment / context:<br><textarea id="note-{did}" placeholder="e.g. Doorbell doing NTP lookups (pool.ntp.org)."></textarea></label></div>')
 
         body.append('<div class="row" style="margin-top:10px">')
-        body.append(f'<label>Suggest suppress (allowlist) action: <select id="action-{aid}">'
+        body.append(f'<label>Suggest suppress (allowlist) action: <select id="action-{did}">'
                     '<option value="">(none)</option>'
                     '<option value="domain">domain</option>'
                     '<option value="domain_suffix">domain suffix</option>'
                     '<option value="dst_ip">destination IP</option>'
                     '<option value="rdns_suffix">rDNS suffix</option>'
                     '</select></label>')
-        body.append(f'<label>Value: <input id="actionval-{aid}" size="32" placeholder="e.g. pool.ntp.org or .ntp.org"/></label>')
-        body.append(f'<button onclick="onSave(\'{aid}\')">Save</button>')
+        body.append(f'<label>Value: <input id="actionval-{did}" size="32" placeholder="e.g. pool.ntp.org or .ntp.org"/></label>')
+        body.append(f'<button onclick="onSave(\'{did}\')">Save</button>')
+        body.append('</div>')
         body.append('</div>')
 
 body.append('</div>')
