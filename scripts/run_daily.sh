@@ -458,7 +458,28 @@ for p in paths:
             if (not is_private(dst)) and is_private(src):
                 src_to_ext[src] = src_to_ext.get(src, 0) + 1
                 dst_ext[dst] = dst_ext.get(dst, 0) + 1
-                if proto == 'tcp' and port in ('8883','8443','22','445'):
+                # Watch ports: base set + optional local uncommitted additions
+                watch_ports = {'8883','8443','22','445'}
+                try:
+                    import os, re
+                    workdir = os.environ.get('HOMENETSEC_WORKDIR', '')
+                    wp_path = os.environ.get('HOMENETSEC_WATCH_PORTS_FILE')
+                    if not wp_path and workdir:
+                        wp_path = os.path.join(workdir, 'state', 'watch_ports.local.txt')
+                    if wp_path and os.path.exists(wp_path):
+                        for line in open(wp_path, 'r', encoding='utf-8', errors='replace'):
+                            line = line.strip()
+                            if not line or line.startswith('#'):
+                                continue
+                            m = re.match(r'^(\d{1,5})', line)
+                            if m:
+                                p = m.group(1)
+                                if 0 < int(p) < 65536:
+                                    watch_ports.add(p)
+                except Exception:
+                    pass
+
+                if proto == 'tcp' and port in watch_ports:
                     key = f"{src} -> {dst}:{port}"
                     watch[key] = watch.get(key, 0) + 1
 
@@ -474,7 +495,12 @@ for ip, n in sorted(dst_ext.items(), key=lambda kv: kv[1], reverse=True)[:5]:
     extra = f" ({host})" if host else ""
     print(f"{n}\t{ip}{extra}")
 print()
-print('Watch ports (8883, 8443, 22, 445) to external (top tuples):')
+try:
+    wp_sorted = sorted(watch_ports, key=lambda x: int(x))
+    wp_label = ', '.join(wp_sorted)
+except Exception:
+    wp_label = 'custom'
+print(f'Watch ports ({wp_label}) to external (top tuples):')
 for k, n in sorted(watch.items(), key=lambda kv: kv[1], reverse=True)[:5]:
     try:
         dst = k.split('->',1)[1].strip().rsplit(':',1)[0].strip()
