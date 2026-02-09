@@ -65,6 +65,8 @@ services:
     volumes:
       - ${HOMENETSEC_WORKDIR:-./output}/pcaps:/pcaps:ro
       - ${HOMENETSEC_WORKDIR:-./output}/suricata:/out
+      # Host-managed Suricata rule cache (populated by scripts/update_suricata_rules.sh)
+      - ${HOMENETSEC_WORKDIR:-./output}/suricata-rules:/var/lib/suricata/rules
     # Env vars:
     # - DAY: YYYY-MM-DD (used only to place output under /out/$DAY)
     # - PCAP: absolute path to a single pcap under /pcaps (required)
@@ -78,6 +80,7 @@ services:
        EVE_NAME="$${EVE_NAME:-eve.json}";
        suricata -r "$${PCAP}" \
          -l "/out/$${DAY}" \
+         -S /var/lib/suricata/rules/suricata.rules \
          --set outputs.1.eve-log.enabled=yes \
          --set outputs.1.eve-log.filename="$${EVE_NAME}" \
          --set outputs.1.eve-log.types.0.alert.enabled=no \
