@@ -26,7 +26,9 @@ import glob
 import json
 import os
 import re
+import sqlite3
 import sys
+from collections import Counter, defaultdict
 from urllib.request import Request, urlopen
 
 
@@ -154,13 +156,227 @@ def zeek_dns_domains_for_ip(zeek_logs_root: str, day: str, dst_ip: str, limit: i
     return domains
 
 
-def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str, str], zeek_logs_root: str, enrichment_host_ip: str) -> dict:
+def _parse_rita_summary_bytes(rita_summary_path: str) -> dict[tuple[str, str], dict]:
+    """Parse rita-summary-YYYY-MM-DD.txt beacons table and return mapping (src,dst)->metrics."""
+    out: dict[tuple[str, str], dict] = {}
+    if not os.path.exists(rita_summary_path):
+        return out
+    in_beacons = False
+    for line in open(rita_summary_path, "r", encoding="utf-8", errors="replace"):
+        line = line.strip()
+        if line.startswith("Top beacons:"):
+            in_beacons = True
+            continue
+        if in_beacons and (not line or line.startswith("(") or line.startswith("Top ")):
+            # end section
+            if line.startswith("Top "):
+                in_beacons = False
+            continue
+        if not in_beacons:
+            continue
+        # CSV row: Score,Source IP,Destination IP,Connections,Avg. Bytes,Total Bytes,...
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 6 or parts[0] == "Score":
+            continue
+        try:
+            src = parts[1]
+            dst = parts[2]
+            conns = int(parts[3])
+            avg_bytes = int(float(parts[4]))
+            total_bytes = int(float(parts[5]))
+            out[(src, dst)] = {"connections": conns, "avg_bytes": avg_bytes, "total_bytes": total_bytes}
+        except Exception:
+            continue
+    return out
+
+
+def _db_connect(db_path: str):
+    if not os.path.exists(db_path):
+        return None
+    try:
+        return sqlite3.connect(db_path)
+    except Exception:
+        return None
+
+
+def _seen_dst_for_src(conn, src_ip: str, dst_ip: str, lookback_days: int, day: str) -> bool:
+    """Was dst_ip seen as an external destination for src_ip in the prior lookback window?"""
+    if conn is None:
+        return False
+    try:
+        cur = conn.execute(
+            """
+            SELECT 1
+            FROM day_dest_unique
+            WHERE src_ip=? AND dst_ip=? AND day < ? AND day >= date(?, ?)
+            LIMIT 1
+            """,
+            (src_ip, dst_ip, day, day, f"-{lookback_days} day"),
+        )
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _dns_nxdomain_stats(conn, day: str, lookback_days: int = 7):
+    """Return per-client today's NXDOMAIN ratio and historical avg ratio."""
+    if conn is None:
+        return {}
+    out = {}
+    try:
+        # today totals
+        cur = conn.execute(
+            """
+            SELECT client_ip,
+                   SUM(count) as total,
+                   SUM(CASE WHEN rcode='NXDOMAIN' THEN count ELSE 0 END) as nx
+            FROM day_dns_counts
+            WHERE day=?
+            GROUP BY client_ip
+            """,
+            (day,),
+        )
+        today = {r[0]: {"total": int(r[1] or 0), "nx": int(r[2] or 0)} for r in cur.fetchall()}
+
+        # historical ratios
+        cur2 = conn.execute(
+            """
+            SELECT day, client_ip,
+                   SUM(count) as total,
+                   SUM(CASE WHEN rcode='NXDOMAIN' THEN count ELSE 0 END) as nx
+            FROM day_dns_counts
+            WHERE day < ? AND day >= date(?, ?) 
+            GROUP BY day, client_ip
+            """,
+            (day, day, f"-{lookback_days} day"),
+        )
+        hist_by_client = defaultdict(list)
+        for d, ip, total, nx in cur2.fetchall():
+            total = int(total or 0)
+            nx = int(nx or 0)
+            if total <= 0:
+                continue
+            hist_by_client[ip].append(nx / total)
+
+        for ip, t in today.items():
+            total = t["total"]
+            nx = t["nx"]
+            ratio = (nx / total) if total else 0.0
+            hist = hist_by_client.get(ip) or []
+            hist_avg = sum(hist) / len(hist) if hist else 0.0
+            out[ip] = {"today_ratio": ratio, "today_total": total, "hist_avg_ratio": hist_avg}
+        return out
+    except Exception:
+        return {}
+
+
+def _suricata_summarize(workdir: str, day: str, src_dst_interest: set[tuple[str, str]]):
+    """Summarize Suricata evidence.
+
+    - TLS fingerprints (JA4) from EVE tls events
+    - Alerts from fast.log (reliable even when EVE alert events are disabled)
+
+    Keep it cheap: only scan a handful of recent eve-*.json files, and only the tail of fast.log.
+    """
+    suri_dir = os.path.join(workdir, "suricata", day)
+    if not os.path.isdir(suri_dir):
+        return {"alerts": [], "tls_fp": {}}
+
+    # Prefer per-merged EVE files; fall back to eve.json
+    eve_files = sorted(glob.glob(os.path.join(suri_dir, "eve-*.json")))
+    if not eve_files and os.path.exists(os.path.join(suri_dir, "eve.json")):
+        eve_files = [os.path.join(suri_dir, "eve.json")]
+
+    eve_files = sorted(eve_files, key=lambda p: os.path.getmtime(p))[-6:]
+
+    ja4_counts = Counter()  # (src,dst,ja4)
+    for p in eve_files:
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+
+                    if ev.get("event_type") != "tls":
+                        continue
+                    src = ev.get("src_ip")
+                    dst = ev.get("dest_ip")
+                    if not src or not dst:
+                        continue
+                    if src_dst_interest and (src, dst) not in src_dst_interest:
+                        continue
+                    tls = ev.get("tls") or {}
+                    ja4 = tls.get("ja4")
+                    if ja4:
+                        ja4_counts[(src, dst, str(ja4))] += 1
+        except Exception:
+            continue
+
+    fp_by_tuple = defaultdict(list)
+    for (src, dst, fp), c in ja4_counts.most_common(80):
+        fp_by_tuple[(src, dst)].append({"ja4": fp, "count": c})
+
+    # Alerts from fast.log tail
+    fast_path = os.path.join(suri_dir, "fast.log")
+    alert_counts = Counter()
+    try:
+        if os.path.exists(fast_path):
+            # Read tail in a memory-bounded way
+            from collections import deque
+
+            dq = deque(maxlen=50000)
+            with open(fast_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    dq.append(line.rstrip("\n"))
+
+            # Example fast.log line:
+            # 02/09/2026-05:06:30.889307  [**] [1:2260002:1] SURICATA Applayer ... [**] ...
+            for line in dq:
+                m = re.search(r"\[\*\*\]\s*\[(\d+):(\d+):(\d+)\]\s*([^\[]+?)\s*\[\*\*\]", line)
+                if not m:
+                    continue
+                gid, sid, rev, sig = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+                key = f"{gid}:{sid}:{rev}:{sig}"
+                alert_counts[key] += 1
+    except Exception:
+        pass
+
+    top_alerts = [{"key": k, "count": c} for k, c in alert_counts.most_common(8)]
+
+    return {"alerts": top_alerts, "tls_fp": {f"{src}|{dst}": v for (src, dst), v in fp_by_tuple.items()}}
+
+
+def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str, str], zeek_logs_root: str, enrichment_host_ip: str, workdir: str) -> dict:
     day = candidates.get("day") or ""
     signals = (candidates.get("signals") or {})
 
+    # Baseline DB (for per-device novelty + DNS anomalies)
+    baseline_db_path = os.path.join(workdir, "state", "baselines.sqlite")
+    db = _db_connect(baseline_db_path)
+
+    # RITA beacon extra metrics (bytes)
+    rita_summary_path = os.path.join(workdir, "rita-data", f"rita-summary-{day}.txt")
+    rita_metrics = _parse_rita_summary_bytes(rita_summary_path)
+
+    # Interest set for Suricata TLS/alerts filtering
+    src_dst_interest: set[tuple[str, str]] = set()
+    for b in (signals.get("rita_beacons") or []):
+        if isinstance(b, dict) and b.get("src_ip") and b.get("dst_ip"):
+            src_dst_interest.add((b.get("src_ip"), b.get("dst_ip")))
+
+    suri = _suricata_summarize(workdir, day, src_dst_interest)
+
     items = []
 
-    # Today we triage primarily RITA beacons (as that tends to be the most actionable periodicity signal).
+    # 2) Per-device novelty (dst_ip not seen for this src in 30d)
+    # 3) Beacon quality scoring (use bytes per conn from RITA summary when available)
+    lookback_days = 30
+
     for b in (signals.get("rita_beacons") or []):
         if not isinstance(b, dict):
             continue
@@ -177,8 +393,12 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
         domains = zeek_dns_domains_for_ip(zeek_logs_root, day, dst)
         domain = domains[0] if domains else ""
 
+        seen_before = _seen_dst_for_src(db, src, dst, lookback_days, day)
+
         score = float(b.get("score") or 0.0)
         severity = "med" if score >= 0.99 else "low"
+        if not seen_before and severity == "low":
+            severity = "med"  # new-for-device gets bumped
 
         title = f"Periodic connections: {src} → {dst}"
         if src_name:
@@ -187,9 +407,23 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
             title += f" (DNS: {domain})"
 
         verdict = "needs_review"
-        # If evidence points strongly to NTP, mark likely benign.
         if domain.endswith(".pool.ntp.org") or "ntp" in (b.get("dst_rdns") or ""):
             verdict = "likely_benign"
+
+        # Beacon quality heuristics
+        bm = rita_metrics.get((src, dst)) or {}
+        avg_bytes = bm.get("avg_bytes")
+        total_bytes = bm.get("total_bytes")
+        conns = int(b.get("connections") or 0)
+        bytes_per_conn = (total_bytes / conns) if (total_bytes and conns) else None
+
+        quality_notes = []
+        if bytes_per_conn is not None:
+            quality_notes.append(f"bytes_per_conn≈{bytes_per_conn:.1f}")
+            if bytes_per_conn < 400:
+                quality_notes.append("pattern=small-periodic (NTP/keepalive-like)")
+            elif bytes_per_conn > 5000:
+                quality_notes.append("pattern=larger-periodic (worth attribution)")
 
         ev_notes = []
         if b.get("dst_rdns"):
@@ -198,6 +432,15 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
                 ev_notes.append(f"rdns_source=enrichment (resolver traffic originates from {enrichment_host_ip})")
         if domains:
             ev_notes.append("dns_queries=" + ", ".join(domains))
+        if not seen_before:
+            ev_notes.append(f"novelty=new-for-device (not seen for {src} in prior {lookback_days}d)")
+        ev_notes.extend(quality_notes)
+
+        # JA4 evidence if present in suricata scan
+        fp_key = f"{src}|{dst}"
+        ja4_list = (suri.get("tls_fp") or {}).get(fp_key) or []
+        if ja4_list:
+            ev_notes.append(f"ja4_top={ja4_list[0].get('ja4')}")
 
         items.append(
             {
@@ -239,11 +482,77 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
             }
         )
 
+    # 4) DNS anomalies (NXDOMAIN spikes)
+    dns_stats = _dns_nxdomain_stats(db, day, lookback_days=7)
+    for ip, st in dns_stats.items():
+        total = st.get("today_total") or 0
+        ratio = st.get("today_ratio") or 0.0
+        hist = st.get("hist_avg_ratio") or 0.0
+        if total < 200:
+            continue
+        if ratio < 0.25:
+            continue
+        if ratio < hist * 2 and ratio < 0.4:
+            continue
+
+        name = client_map.get(ip, "")
+        title = f"DNS NXDOMAIN spike: {ip}"
+        if name:
+            title = f"DNS NXDOMAIN spike: {name} ({ip})"
+
+        items.append(
+            {
+                "id": f"dns_nxdomain|{ip}|{day}",
+                "severity": "med",
+                "verdict": "needs_review",
+                "title": title,
+                "what": f"High NXDOMAIN ratio today ({ratio:.1%}) over {total} DNS queries.",
+                "why_flagged": f"NXDOMAIN ratio {ratio:.1%} vs 7d avg {hist:.1%}",
+                "most_likely_explanation": "Misconfiguration, blocked tracking, or DGA-like lookups; needs context.",
+                "confidence": 0.55,
+                "evidence": {
+                    "src_ip": ip,
+                    "src_name": name,
+                    "notes": [f"today_total={total}", f"today_nxdomain_ratio={ratio:.3f}", f"hist_avg_ratio={hist:.3f}"]
+                },
+                "recommendation": {
+                    "action": "investigate",
+                    "steps": [
+                        "Check AdGuard query log for top NXDOMAIN qnames for this client.",
+                        "If expected (tracker blocking), comment and consider dismissing.",
+                    ],
+                },
+                "allowlist_suggestion": {"type": "none", "value": "", "scope": "network", "reason": "", "ttl_days": 0},
+            }
+        )
+
+    # 6) Suricata alerts summary (top signatures)
+    top_alerts = suri.get("alerts") or []
+    if top_alerts:
+        items.append(
+            {
+                "id": f"suricata_alerts|{day}",
+                "severity": "info",
+                "verdict": "needs_review",
+                "title": "Suricata alerts (top signatures)",
+                "what": "Suricata ET Open signature alerts observed in offline processing.",
+                "why_flagged": "Alert events were generated by Suricata; review for high-signal signatures.",
+                "most_likely_explanation": "Many signatures are noisy; focus on malware/exploit/high-priority categories.",
+                "confidence": 0.6,
+                "evidence": {"notes": [f"{a['count']}× {a['key']}" for a in top_alerts[:8]]},
+                "recommendation": {"action": "monitor", "steps": ["If noisy, we can filter to priority<=2 or malware categories only."]},
+                "allowlist_suggestion": {"type": "none", "value": "", "scope": "network", "reason": "", "ttl_days": 0},
+            }
+        )
+
     posture = "ok" if not items else "review"
 
     notes = [
         "Device friendly names are sourced from AdGuard Home registered clients when available.",
+        "Per-device novelty is computed from baselines.sqlite (day_dest_unique).",
+        "DNS NXDOMAIN anomaly checks use baselines.sqlite (day_dns_counts).",
         "DNS correlation uses Zeek dns.log answers when present.",
+        "TLS JA4 evidence is pulled from recent Suricata EVE tls events when present.",
         "Dismissed items (from dashboard feedback) are hidden.",
     ]
     if enrichment_host_ip:
@@ -256,7 +565,7 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
         "generated_at": now_iso_utc(),
         "summary": {
             "posture": posture,
-            "headline": f"{len(items)} recurring beacon candidates (RITA).",
+            "headline": f"{len(items)} items surfaced (beacons + anomalies + alerts).",
             "notes": notes,
         },
         "items": items,
@@ -284,7 +593,7 @@ def main() -> int:
     client_map = adguard_client_map(args.adguard_env)
 
     enrichment_host_ip = os.environ.get("HOMENETSEC_ENRICHMENT_HOST_IP", "").strip()
-    digest = build_digest(candidates, feedback_for_day, client_map, zeek_root, enrichment_host_ip)
+    digest = build_digest(candidates, feedback_for_day, client_map, zeek_root, enrichment_host_ip, workdir)
     save_json_atomic(digest_path, digest)
 
     print(digest_path)
