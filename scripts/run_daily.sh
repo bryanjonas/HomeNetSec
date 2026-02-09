@@ -48,8 +48,10 @@ require_docker() {
   docker info >/dev/null 2>&1 || { echo "[homenetsec] ERROR: docker daemon not reachable"; return 1; }
 }
 
+COMPOSE_PROJECT_PIPELINE="${HOMENETSEC_PIPELINE_COMPOSE_PROJECT:-homenetsec-pipeline}"
+
 compose() {
-  HOMENETSEC_WORKDIR="$WORKDIR" docker compose -f "$COMPOSE_FILE" "$@"
+  HOMENETSEC_WORKDIR="$WORKDIR" docker compose -p "$COMPOSE_PROJECT_PIPELINE" -f "$COMPOSE_FILE" "$@"
 }
 
 pull_pcaps() {

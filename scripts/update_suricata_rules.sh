@@ -20,7 +20,9 @@ cd "$(dirname "$0")/.."
 # Enable ET Open if not already enabled, then update.
 # (suricata-update is idempotent; enable-source may fail if already enabled, so we ignore that.)
 set +e
-DOCKER_BUILDKIT=1 docker compose -f assets/docker-compose.yml --profile ja4 run --rm \
+COMPOSE_PROJECT_PIPELINE="${HOMENETSEC_PIPELINE_COMPOSE_PROJECT:-homenetsec-pipeline}"
+
+DOCKER_BUILDKIT=1 docker compose -p "$COMPOSE_PROJECT_PIPELINE" -f assets/docker-compose.yml --profile ja4 run --rm \
   --entrypoint /bin/sh suricata-offline -lc 'suricata-update list-sources >/dev/null 2>&1 || true; suricata-update enable-source et/open >/dev/null 2>&1 || true; suricata-update' 
 rc=$?
 set -e

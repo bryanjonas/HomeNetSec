@@ -44,8 +44,10 @@ require mergecap
 require capinfos
 require tshark
 
+COMPOSE_PROJECT_PIPELINE="${HOMENETSEC_PIPELINE_COMPOSE_PROJECT:-homenetsec-pipeline}"
+
 compose() {
-  HOMENETSEC_WORKDIR="$WORKDIR" docker compose -f "$ROOT_DIR/assets/docker-compose.yml" "$@"
+  HOMENETSEC_WORKDIR="$WORKDIR" docker compose -p "$COMPOSE_PROJECT_PIPELINE" -f "$ROOT_DIR/assets/docker-compose.yml" "$@"
 }
 
 now_epoch=$(date +%s)
