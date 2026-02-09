@@ -26,6 +26,7 @@ Therefore, HomeNetSec uses **SFTP** (not `ssh <cmd>`), so it can operate with a 
 
 ### 1.2 DNS telemetry (resolver context)
 - DNS telemetry is pulled from **AdGuard Home** via its HTTP API.
+- Evidence enrichment should also attempt to map `src_ip` → **client name** using the DNS server’s client list (when available), so digests read like “Kitchen-iPad (192.168.1.X)” instead of just an IP.
 - Credentials are not in the repo; they live in a local env file (default documented in README):
   - `~/.openclaw/credentials/adguard.env`
 

@@ -38,6 +38,7 @@ Write a JSON file:
       "confidence": 0.0,
       "evidence": {
         "src_ip": "optional",
+        "src_name": "optional (DNS/DHCP client name for src_ip, if available)",
         "dst_ip": "optional",
         "dst_port": 0,
         "domain": "optional",
