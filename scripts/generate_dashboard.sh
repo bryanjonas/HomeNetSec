@@ -214,8 +214,6 @@ async function onSave(domId){
 
   const note = document.querySelector(`#note-${domId}`).value;
   const verdict = document.querySelector(`#verdict-${domId}`).value;
-  const action = document.querySelector(`#action-${domId}`).value;
-  const actionValue = document.querySelector(`#actionval-${domId}`).value;
 
   const dismissed = document.querySelector(`#dismiss-${domId}`).checked;
   const rec = { updated_at: new Date().toISOString(), verdict, note, dismissed };
