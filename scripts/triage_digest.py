@@ -445,6 +445,7 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
         items.append(
             {
                 "id": alert_id,
+                "kind": "rita_beacon",
                 "severity": severity,
                 "verdict": verdict,
                 "title": title,
@@ -503,6 +504,7 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
         items.append(
             {
                 "id": f"dns_nxdomain|{ip}|{day}",
+                "kind": "dns_nxdomain_spike",
                 "severity": "med",
                 "verdict": "needs_review",
                 "title": title,
@@ -532,6 +534,7 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
         items.append(
             {
                 "id": f"suricata_alerts|{day}",
+                "kind": "suricata_alert_summary",
                 "severity": "info",
                 "verdict": "needs_review",
                 "title": "Suricata alerts (top signatures)",

@@ -284,7 +284,29 @@ else:
 
         body.append('<hr>')
         body.append(f'<div id="card-{did}" data-alert-id="{aid}">')
-        body.append(f'<div class="row"><div class="pill">{html.escape(a["kind"])}</div><div class="small muted">id: <code>{aid}</code></div></div>')
+        # Render kind + small badges
+        badges = []
+        try:
+            ev = a.get('data') or {}
+            evidence = ev.get('evidence') or {}
+            notes = evidence.get('notes') or []
+            if any(isinstance(x, str) and x.startswith('novelty=') for x in notes):
+                badges.append('new-for-device')
+            if any(isinstance(x, str) and x.startswith('ja4_') for x in notes) or any(isinstance(x, str) and x.startswith('ja4') for x in notes):
+                badges.append('ja4')
+            if evidence.get('domain'):
+                badges.append('dns')
+        except Exception:
+            badges = badges
+
+        base_kind = a.get('data', {}).get('kind') if isinstance(a.get('data'), dict) else None
+        kind_label = base_kind or a["kind"]
+
+        pills = [f'<div class="pill">{html.escape(str(kind_label))}</div>']
+        for b in badges[:4]:
+            pills.append(f'<div class="pill">{html.escape(b)}</div>')
+
+        body.append(f'<div class="row">{"".join(pills)}<div class="small muted">id: <code>{aid}</code></div></div>')
         body.append(f'<h3 style="margin:10px 0">{html.escape(a["title"])}</h3>')
         body.append('<details><summary>evidence (raw)</summary>')
         body.append('<pre>' + html.escape(json.dumps(a['data'], indent=2, sort_keys=True)) + '</pre>')
