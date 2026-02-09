@@ -20,6 +20,7 @@ TODAY_ET="${1:-$(ET_DATE)}"
 WWW_DIR="$WORKDIR/www"
 STATE_JSON="$WORKDIR/state/hourly_ingest_state.json"
 REPORT_TXT="$WORKDIR/reports/${TODAY_ET}.txt"
+REPORTS_DIR="$WORKDIR/reports"
 DIGEST_JSON="$WORKDIR/state/${TODAY_ET}.digest.json"
 CANDIDATES_JSON="$WORKDIR/state/${TODAY_ET}.candidates.json"
 
@@ -72,10 +73,10 @@ with open(out_path, 'w', encoding='utf-8') as f:
 PY
 
 # Build the single-page dashboard at / (index.html).
-python3 - "$WWW_DIR/status.json" "$REPORT_TXT" "$DIGEST_JSON" "$CANDIDATES_JSON" "$WORKDIR/state/feedback.json" "$WORKDIR/state/alerts_queue.json" "$WWW_DIR/index.html" <<'PY'
-import html, json, os, sys, hashlib
+python3 - "$WWW_DIR/status.json" "$REPORTS_DIR" "$DIGEST_JSON" "$CANDIDATES_JSON" "$WORKDIR/state/feedback.json" "$WORKDIR/state/alerts_queue.json" "$WWW_DIR/index.html" <<'PY'
+import html, json, os, sys, hashlib, time
 
-status_path, report_path, digest_path, candidates_path, feedback_path, queue_path, out_path = sys.argv[1:8]
+status_path, reports_dir, digest_path, candidates_path, feedback_path, queue_path, out_path = sys.argv[1:8]
 
 st = json.load(open(status_path, 'r', encoding='utf-8'))
 hourly = st.get('hourly_state') or {}
@@ -128,9 +129,38 @@ last_epoch = hourly.get('last_epoch')
 if last_epoch is None:
     last_epoch = hourly.get('last_ingested_epoch')
 
+# Rolling 24h roll-up: concatenate report files modified in the last 24 hours.
 report_txt = ''
-if os.path.exists(report_path):
-    report_txt = open(report_path, 'r', encoding='utf-8', errors='replace').read()
+try:
+    now = time.time()
+    paths = []
+    if os.path.isdir(reports_dir):
+        for fn in os.listdir(reports_dir):
+            if not fn.endswith('.txt'):
+                continue
+            p = os.path.join(reports_dir, fn)
+            try:
+                st2 = os.stat(p)
+            except Exception:
+                continue
+            if (now - st2.st_mtime) <= 24*3600:
+                paths.append((st2.st_mtime, p))
+
+    # newest first
+    paths.sort(key=lambda x: x[0], reverse=True)
+
+    chunks = []
+    for mtime, p in paths:
+        label = os.path.basename(p)
+        ts = time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(mtime))
+        txt = open(p, 'r', encoding='utf-8', errors='replace').read().strip()
+        if not txt:
+            continue
+        chunks.append(f"===== {label} (mtime {ts}) =====\n{txt}\n")
+
+    report_txt = "\n".join(chunks).strip()
+except Exception:
+    report_txt = ''
 
 digest = None
 if os.path.exists(digest_path):
@@ -628,11 +658,11 @@ else:
 body.append('</div>')
 
 body.append('<div class="card">')
-body.append('<h2>Raw daily roll-up</h2>')
+body.append('<h2>Raw roll-up (last 24 hours)</h2>')
 if report_txt.strip():
     body.append('<pre>' + html.escape(report_txt) + '</pre>')
 else:
-    body.append('<div class="muted">No daily report text found yet.</div>')
+    body.append('<div class="muted">No report text found in the last 24 hours.</div>')
 body.append('</div>')
 
 body.append(f'<script>{js}</script>')
