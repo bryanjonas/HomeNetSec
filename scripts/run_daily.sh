@@ -386,10 +386,12 @@ summarize_zeek_basic() {
     return 0
   fi
 
-  python3 - "$ZEEK_ROOT" <<'PY'
+  python3 - "$ZEEK_ROOT" "$DAY" "$WORKDIR" <<'PY'
 import glob, os, sys, subprocess
 
 zeek_root = sys.argv[1]
+day = sys.argv[2]
+workdir = sys.argv[3]
 paths = glob.glob(os.path.join(zeek_root, '*.zeek', 'conn.log'))
 
 def is_private(ip: str) -> bool:
@@ -489,10 +491,79 @@ print('Top internal sources -> external (by conn count):')
 for ip, n in sorted(src_to_ext.items(), key=lambda kv: kv[1], reverse=True)[:5]:
     print(f"{n}\t{ip}")
 print()
+# Best-effort DNS correlation: map dst_ip -> a domain observed resolving to it in Zeek dns.log.
+# We prefer zeek-flat for the day (same input used for RITA).
+def dns_ip_to_domain(workdir, day):
+    try:
+        dns_path = os.path.join(workdir, 'zeek-flat', day, 'dns.log')
+        if not os.path.exists(dns_path):
+            return {}
+        sep = '\t'
+        idx = {}
+        counts = {}  # (ip, qname) -> count
+
+        # Only track domains for the current top destination set (fast).
+        ips = set(dst_ext.keys())
+
+        with open(dns_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if not line:
+                    continue
+                if line.startswith('#separator'):
+                    if '\\x09' in line:
+                        sep = '\t'
+                    continue
+                if line.startswith('#fields'):
+                    parts = line.split()
+                    fields = parts[1:]
+                    idx = {name:i for i,name in enumerate(fields)}
+                    continue
+                if line.startswith('#'):
+                    continue
+                if not idx:
+                    continue
+                cols = line.split(sep)
+
+                def get(name, default=''):
+                    i = idx.get(name)
+                    if i is None or i >= len(cols):
+                        return default
+                    v = cols[i]
+                    return '' if v in ('-', '(empty)') else v
+
+                q = get('query')
+                ans = get('answers')
+                if not q or not ans:
+                    continue
+
+                for ip in ips:
+                    # Zeek "answers" is a set-like string; substring match is sufficient for IPv4 here.
+                    if ip in ans:
+                        k = (ip, q)
+                        counts[k] = counts.get(k, 0) + 1
+
+        per_ip = {}
+        for (ip, q), c in counts.items():
+            cur = per_ip.get(ip)
+            if not cur or c > cur[0]:
+                per_ip[ip] = (c, q)
+        return {ip:q for ip,(c,q) in per_ip.items()}
+    except Exception:
+        return {}
+
+ip2dom = dns_ip_to_domain(workdir, day)
+
 print('Top external destinations (dst IP by conn count):')
 for ip, n in sorted(dst_ext.items(), key=lambda kv: kv[1], reverse=True)[:5]:
     host = rdns(ip)
-    extra = f" ({host})" if host else ""
+    dom = ip2dom.get(ip, '')
+    extra_bits = []
+    if host:
+        extra_bits.append(host)
+    if dom:
+        extra_bits.append(f"DNS: **{dom}**")
+    extra = f" ({' · '.join(extra_bits)})" if extra_bits else ""
     print(f"{n}\t{ip}{extra}")
 print()
 try:
