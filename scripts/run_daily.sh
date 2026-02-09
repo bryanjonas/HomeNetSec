@@ -586,7 +586,113 @@ PY
 summarize_rita() {
   local p="$RITA_DATA_DIR/rita-summary-${DAY}.txt"
   if [[ -f "$p" ]]; then
-    sed -n '1,120p' "$p"
+    # Annotate destination IPs with a best-effort domain correlation from Zeek dns.log.
+    python3 - "$WORKDIR" "$DAY" "$p" <<'PY'
+import os, re, sys
+
+workdir = sys.argv[1]
+day = sys.argv[2]
+path = sys.argv[3]
+
+# Build dst_ip -> domain map from zeek-flat dns.log (best-effort)
+ip2dom = {}
+try:
+    dns_path = os.path.join(workdir, 'zeek-flat', day, 'dns.log')
+    if os.path.exists(dns_path):
+        sep = '\t'
+        idx = {}
+        counts = {}  # (ip, qname) -> count
+        with open(dns_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if not line:
+                    continue
+                if line.startswith('#separator'):
+                    if '\\x09' in line:
+                        sep = '\t'
+                    continue
+                if line.startswith('#fields'):
+                    parts = line.split()
+                    fields = parts[1:]
+                    idx = {name:i for i,name in enumerate(fields)}
+                    continue
+                if line.startswith('#'):
+                    continue
+                if not idx:
+                    continue
+                cols = line.split(sep)
+                def get(name, default=''):
+                    i = idx.get(name)
+                    if i is None or i >= len(cols):
+                        return default
+                    v = cols[i]
+                    return '' if v in ('-', '(empty)') else v
+                q = get('query')
+                ans = get('answers')
+                if not q or not ans:
+                    continue
+                # Find IPv4s in answers (set-like)
+                for ip in re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', ans):
+                    k = (ip, q)
+                    counts[k] = counts.get(k, 0) + 1
+        per_ip = {}
+        for (ip, q), c in counts.items():
+            cur = per_ip.get(ip)
+            if not cur or c > cur[0]:
+                per_ip[ip] = (c, q)
+        ip2dom = {ip:q for ip,(c,q) in per_ip.items()}
+except Exception:
+    ip2dom = {}
+
+# Pass through rita summary, annotating the dst_ip field for the two CSV sections.
+# Top beacons line format:
+#   Score,Source IP,Destination IP,Connections,...
+# Top long connections:
+#   Source IP,Destination IP,Port:Protocol:Service,...
+
+in_beacons = False
+in_long = False
+for raw in open(path, 'r', encoding='utf-8', errors='replace'):
+    line = raw.rstrip('\n')
+    if line.startswith('Top beacons:'):
+        in_beacons = True
+        in_long = False
+        print(line)
+        continue
+    if line.startswith('Top long connections:'):
+        in_beacons = False
+        in_long = True
+        print(line)
+        continue
+
+    if in_beacons:
+        if line.startswith('Score,') or line.startswith('(') or not line.strip():
+            print(line)
+            continue
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) >= 3:
+            dst = parts[2]
+            dom = ip2dom.get(dst, '')
+            if dom:
+                parts[2] = f"{dst} (DNS: **{dom}**)"
+            print(','.join(parts))
+            continue
+
+    if in_long:
+        if line.startswith('Source IP,') or line.startswith('(') or not line.strip():
+            print(line)
+            continue
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) >= 2:
+            dst = parts[1]
+            dom = ip2dom.get(dst, '')
+            if dom:
+                parts[1] = f"{dst} (DNS: **{dom}**)"
+            print(','.join(parts))
+            continue
+
+    print(line)
+PY
   else
     echo "RITA: (no summary file found at $p)"
   fi
