@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Self-check: fail fast if this script has a syntax error (prevents wasted PCAP pulls).
+if ! bash -n "$0"; then
+  echo "[homenetsec] ERROR: hourly_ingest_merge_process.sh failed bash syntax check" >&2
+  exit 2
+fi
+
 # Hourly ingest:
 # - Download all new PCAPs since last successful ingest
 # - Skip the newest N remote files to avoid partial copies
