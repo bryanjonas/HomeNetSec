@@ -75,7 +75,10 @@ day = st.get('today_et') or ''
 feedback_for_day = {}
 try:
     fb = json.load(open(feedback_path, 'r', encoding='utf-8'))
-    feedback_for_day = (fb.get(day) or {}) if isinstance(fb, dict) else {}
+    if isinstance(fb, dict):
+        # feedback.json format: {"days": {"YYYY-MM-DD": {"alert_id": {...}}}, ...}
+        days = fb.get('days') if isinstance(fb.get('days'), dict) else {}
+        feedback_for_day = (days.get(day) or {}) if isinstance(days, dict) else {}
 except FileNotFoundError:
     feedback_for_day = {}
 except Exception:
