@@ -391,8 +391,7 @@ body.append('</details>')
 body.append('</div>')
 
 body.append('<div class="card">')
-body.append("<h2>Active alerts (remain until dismissed)</h2>")
-body.append('<div class="muted">This is a persistent review queue. Alerts stay here across days until you explicitly dismiss them. The verdict drop-down is treated as your final verdict.</div>')
+body.append("<h2>Active alerts</h2>")
 
 if not alerts:
     body.append('<div class="muted">No candidates found yet. This will populate after the 8pm daily run writes <code>output/state/YYYY-MM-DD.candidates.json</code>.</div>')
@@ -594,7 +593,7 @@ else:
 body.append('</div>')
 
 body.append('<div class="card">')
-body.append('<h2>Raw daily roll-up (if present)</h2>')
+body.append('<h2>Raw daily roll-up</h2>')
 if report_txt.strip():
     body.append('<pre>' + html.escape(report_txt) + '</pre>')
 else:
