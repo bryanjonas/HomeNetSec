@@ -154,7 +154,7 @@ def zeek_dns_domains_for_ip(zeek_logs_root: str, day: str, dst_ip: str, limit: i
     return domains
 
 
-def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str, str], zeek_logs_root: str) -> dict:
+def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str, str], zeek_logs_root: str, enrichment_host_ip: str) -> dict:
     day = candidates.get("day") or ""
     signals = (candidates.get("signals") or {})
 
@@ -194,6 +194,8 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
         ev_notes = []
         if b.get("dst_rdns"):
             ev_notes.append(f"dst_rdns={b.get('dst_rdns')}")
+            if enrichment_host_ip:
+                ev_notes.append(f"rdns_source=enrichment (resolver traffic originates from {enrichment_host_ip})")
         if domains:
             ev_notes.append("dns_queries=" + ", ".join(domains))
 
@@ -215,6 +217,10 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
                     "domain": domain,
                     "rdns": b.get("dst_rdns") or "",
                     "notes": ev_notes,
+                    "enrichment": {
+                        "host_ip": enrichment_host_ip,
+                        "note": "rDNS/ASN enrichments are performed by the analysis host and may appear in AdGuard query logs as PTR lookups from host_ip; they should not be interpreted as client DNS behavior.",
+                    },
                 },
                 "recommendation": {
                     "action": "monitor" if verdict == "likely_benign" else "investigate",
@@ -235,17 +241,23 @@ def build_digest(candidates: dict, feedback_for_day: dict, client_map: dict[str,
 
     posture = "ok" if not items else "review"
 
+    notes = [
+        "Device friendly names are sourced from AdGuard Home registered clients when available.",
+        "DNS correlation uses Zeek dns.log answers when present.",
+        "Dismissed items (from dashboard feedback) are hidden.",
+    ]
+    if enrichment_host_ip:
+        notes.append(
+            f"Enrichment lookups (e.g., rDNS) originate from the analysis host ({enrichment_host_ip}) and may show up in AdGuard query logs; do not treat those PTR lookups as device behavior."
+        )
+
     return {
         "day": day,
         "generated_at": now_iso_utc(),
         "summary": {
             "posture": posture,
             "headline": f"{len(items)} recurring beacon candidates (RITA).",
-            "notes": [
-                "Device friendly names are sourced from AdGuard Home registered clients when available.",
-                "DNS correlation uses Zeek dns.log answers when present.",
-                "Dismissed items (from dashboard feedback) are hidden.",
-            ],
+            "notes": notes,
         },
         "items": items,
         "allowlist_decisions": [],
@@ -271,7 +283,8 @@ def main() -> int:
     feedback_for_day = load_feedback(feedback_path, day)
     client_map = adguard_client_map(args.adguard_env)
 
-    digest = build_digest(candidates, feedback_for_day, client_map, zeek_root)
+    enrichment_host_ip = os.environ.get("HOMENETSEC_ENRICHMENT_HOST_IP", "").strip()
+    digest = build_digest(candidates, feedback_for_day, client_map, zeek_root, enrichment_host_ip)
     save_json_atomic(digest_path, digest)
 
     print(digest_path)
