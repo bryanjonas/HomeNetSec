@@ -68,6 +68,10 @@ if [[ ! -f "$REPORT_PATH" ]]; then
   exit 2
 fi
 
+# Build digest JSON from candidates + evidence (writes to $WORKDIR/state/YYYY-MM-DD.digest.json)
+( cd "$ROOT_DIR" && HOMENETSEC_WORKDIR="$WORKDIR" ./scripts/triage_digest.py --day "$TODAY_ET" --workdir "$WORKDIR" ) || \
+  echo "[$(ts)] [homenetsec] WARN: digest triage failed"
+
 # Update local dashboard pages (writes to $WORKDIR/www)
 ( cd "$ROOT_DIR" && HOMENETSEC_WORKDIR="$WORKDIR" ./scripts/generate_dashboard.sh "$TODAY_ET" ) || \
   echo "[$(ts)] [homenetsec] WARN: dashboard generation failed"
