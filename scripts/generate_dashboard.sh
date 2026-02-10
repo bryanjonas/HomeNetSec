@@ -479,7 +479,7 @@ body.append('<div class="card">')
 body.append("<h2>Active alerts</h2>")
 
 if not alerts:
-    body.append('<div class="muted">No candidates found yet. This will populate after the 8pm daily run writes <code>output/state/YYYY-MM-DD.candidates.json</code>.</div>')
+    body.append('<div class="muted">No alerts in the active queue right now. New alerts appear whenever the pipeline generates a digest and they remain until dismissed.</div>')
 else:
     for a in alerts:
         alert_id = a['id']
