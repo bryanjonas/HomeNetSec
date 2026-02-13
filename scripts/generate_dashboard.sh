@@ -308,6 +308,16 @@ for aid in list(queue['items'].keys()):
     if str(aid) in dismissed_any:
         queue['items'].pop(aid, None)
 
+# De-dup: Suricata P1–P2 summary vs per-signature items.
+# If we have any per-signature Suricata items for the day, hide the summary card
+# so it doesn't appear as a separate alert.
+try:
+    has_sig = any(str(aid).startswith('suricata_sig|') and str(aid).endswith('|' + str(day)) for aid in queue['items'].keys())
+    if has_sig:
+        queue['items'].pop(f"suricata_alerts_p12|{day}", None)
+except Exception:
+    pass
+
 # Write updated queue.
 os.makedirs(os.path.dirname(queue_path), exist_ok=True)
 with open(queue_path, 'w', encoding='utf-8') as f:
