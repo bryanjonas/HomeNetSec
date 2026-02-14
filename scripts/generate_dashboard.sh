@@ -347,18 +347,200 @@ for a in alerts:
     a['dom_id'] = hashlib.sha256((a['id']).encode('utf-8')).hexdigest()[:16]
 
 style = """
-body{font-family:system-ui,Arial,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px}
-a{color:#0b5fff;text-decoration:none} a:hover{text-decoration:underline}
-.card{border:1px solid #ddd;border-radius:10px;padding:16px;margin:16px 0}
-.muted{color:#555}
-pre{background:#0b1020;color:#e8eefc;padding:14px;border-radius:10px;overflow:auto;white-space:pre-wrap}
-.small{font-size:12px}
-.row{display:flex;gap:12px;flex-wrap:wrap}
-.pill{display:inline-block;border:1px solid #ccc;border-radius:999px;padding:2px 8px;font-size:12px;color:#333;background:#fafafa}
-textarea{width:100%;min-height:72px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
-select,button,input{font-size:14px}
-button{padding:6px 10px}
-hr{border:none;border-top:1px solid #eee;margin:16px 0}
+:root {
+  --bg: #f8fafc;
+  --card-bg: #ffffff;
+  --border: #e2e8f0;
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --accent: #3b82f6;
+  --success: #10b981;
+  --success-bg: #ecfdf5;
+  --warning: #f59e0b;
+  --warning-bg: #fffbeb;
+  --danger: #ef4444;
+  --danger-bg: #fef2f2;
+  --code-bg: #f1f5f9;
+  --pre-bg: #0f172a;
+  --pre-text: #e2e8f0;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  padding: 0;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.container { max-width: 960px; margin: 0 auto; padding: 24px 20px 48px; }
+header {
+  background: linear-gradient(135deg, #1e3a5f 0%, #2d4a6f 100%);
+  color: #fff;
+  padding: 32px 20px;
+  margin-bottom: 24px;
+}
+header .inner { max-width: 960px; margin: 0 auto; }
+header h1 { margin: 0 0 4px; font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
+header .subtitle { color: #94a3b8; font-size: 14px; margin: 0; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow);
+}
+.card h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.card h2 .icon { font-size: 20px; }
+.metrics { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--code-bg);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.metric.success { background: var(--success-bg); color: #047857; }
+.metric.warning { background: var(--warning-bg); color: #b45309; }
+.metric.danger { background: var(--danger-bg); color: #b91c1c; }
+.metric .label { color: var(--text-muted); font-weight: 400; }
+.muted { color: var(--text-muted); font-size: 14px; }
+.small { font-size: 13px; }
+code {
+  background: var(--code-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+}
+pre {
+  background: var(--pre-bg);
+  color: var(--pre-text);
+  padding: 16px;
+  border-radius: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 12px 0;
+}
+details {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+details summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  list-style: none;
+}
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: '▸ '; color: var(--text-muted); }
+details[open] summary::before { content: '▾ '; }
+details > pre { margin: 0; border-radius: 0 0 8px 8px; }
+hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.pill {
+  display: inline-block;
+  background: var(--code-bg);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.pill.danger { background: var(--danger-bg); color: #b91c1c; }
+.pill.warning { background: var(--warning-bg); color: #b45309; }
+.pill.success { background: var(--success-bg); color: #047857; }
+.alert-item {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--warning);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 16px 0;
+}
+.alert-item h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.alert-item.dismissed { opacity: 0.5; }
+textarea {
+  width: 100%;
+  min-height: 80px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  resize: vertical;
+}
+textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+select, button, input[type="checkbox"] { font-size: 14px; }
+select {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text);
+}
+button {
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+button:hover { background: #2563eb; }
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  accent-color: var(--accent);
+}
+label { display: inline-flex; align-items: center; font-size: 14px; }
+.empty-state {
+  text-align: center;
+  padding: 32px;
+  color: var(--text-muted);
+}
+.empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
+footer {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
 """
 
 js = """
@@ -465,31 +647,50 @@ window.onSave = onSave;
 
 body = []
 body.append('<!doctype html>')
-body.append('<html><head><meta charset="utf-8">')
+body.append('<html lang="en"><head><meta charset="utf-8">')
 body.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
 body.append('<title>HomeNetSec Dashboard</title>')
+body.append('<link rel="preconnect" href="https://fonts.googleapis.com">')
+body.append('<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>')
+body.append('<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">')
 body.append(f'<style>{style}</style>')
 body.append('</head>')
 body.append(f'<body data-day="{html.escape(day)}">')
-body.append('<h1>HomeNetSec</h1>')
-body.append(f"<div class='muted'>Generated: {html.escape(st.get('generated_at',''))} · Day (ET): <code>{html.escape(day)}</code></div>")
+body.append('<header><div class="inner">')
+body.append('<h1>🔒 HomeNetSec</h1>')
+body.append(f"<p class='subtitle'>Network Security Monitor · Generated {html.escape(st.get('generated_at',''))}</p>")
+body.append('</div></header>')
+body.append('<div class="container">')
 
 body.append('<div class="card">')
-body.append('<h2>Hourly ingest</h2>')
+body.append('<h2><span class="icon">📊</span> Pipeline Status</h2>')
+
+pending_count = len(hourly.get('pending') or []) if isinstance(hourly.get('pending'), list) else 0
+hwm = hourly.get('high_watermark_epoch') or ''
+
+body.append('<div class="metrics">')
 if last_epoch:
-    body.append(f"<div>last_epoch: <code>{html.escape(str(last_epoch))}</code></div>")
-else:
-    body.append('<div class="muted">No hourly state found yet.</div>')
-body.append('<details style="margin-top:10px"><summary>raw state</summary>')
+    body.append(f"<div class='metric'><span class='label'>Last Epoch</span> {html.escape(str(last_epoch))}</div>")
+if hwm:
+    body.append(f"<div class='metric'><span class='label'>High Watermark</span> {html.escape(str(hwm))}</div>")
+pending_class = 'warning' if pending_count > 0 else 'success'
+body.append(f"<div class='metric {pending_class}'><span class='label'>Pending</span> {pending_count}</div>")
+body.append('</div>')
+
+if not last_epoch and not hwm:
+    body.append('<div class="muted">No hourly state found yet. The pipeline will populate this after the first ingest run.</div>')
+
+body.append('<details><summary>View raw pipeline state</summary>')
 body.append('<pre>' + html.escape(json.dumps(hourly, indent=2, sort_keys=True)) + '</pre>')
 body.append('</details>')
 body.append('</div>')
 
 body.append('<div class="card">')
-body.append("<h2>Active alerts</h2>")
+alert_class = 'danger' if len(alerts) > 0 else 'success'
+body.append(f'<h2><span class="icon">🚨</span> Active Alerts <span class="metric {alert_class}" style="margin-left:auto">{len(alerts)}</span></h2>')
 
 if not alerts:
-    body.append('<div class="muted">No alerts in the active queue right now. New alerts appear whenever the pipeline generates a digest and they remain until dismissed.</div>')
+    body.append('<div class="empty-state"><div class="icon">✅</div><p>No active alerts. New alerts appear when the pipeline generates a digest and remain until dismissed.</p></div>')
 else:
     for a in alerts:
         alert_id = a['id']
@@ -498,8 +699,7 @@ else:
         aid = html.escape(alert_id)
         did = html.escape(dom_id)
 
-        body.append('<hr>')
-        body.append(f'<div id="card-{did}" data-alert-id="{aid}">')
+        body.append(f'<div class="alert-item" id="card-{did}" data-alert-id="{aid}">')
         # Render kind + small badges
         badges = []
         try:
@@ -518,17 +718,18 @@ else:
         base_kind = a.get('data', {}).get('kind') if isinstance(a.get('data'), dict) else None
         kind_label = base_kind or a["kind"]
 
-        pills = [f'<div class="pill">{html.escape(str(kind_label))}</div>']
-        for b in badges[:4]:
-            pills.append(f'<div class="pill">{html.escape(b)}</div>')
+        body.append(f'<h3>{html.escape(a["title"])}</h3>')
 
-        meta_bits = [f"id: <code>{aid}</code>"]
+        pills = [f'<span class="pill">{html.escape(str(kind_label))}</span>']
+        for b in badges[:4]:
+            pills.append(f'<span class="pill">{html.escape(b)}</span>')
+
+        meta_bits = []
         if a.get('first_seen_day'):
-            meta_bits.append(f"first_seen: <code>{html.escape(str(a.get('first_seen_day')))}</code>")
+            meta_bits.append(f"first: {html.escape(str(a.get('first_seen_day')))}")
         if a.get('last_seen_day'):
-            meta_bits.append(f"last_seen: <code>{html.escape(str(a.get('last_seen_day')))}</code>")
-        body.append(f'<div class="row">{"".join(pills)}<div class="small muted">{" · ".join(meta_bits)}</div></div>')
-        body.append(f'<h3 style="margin:10px 0">{html.escape(a["title"])}</h3>')
+            meta_bits.append(f"last: {html.escape(str(a.get('last_seen_day')))}")
+        body.append(f'<div class="row" style="margin-bottom:12px">{"".join(pills)}<span class="small muted">{" · ".join(meta_bits)}</span></div>')
 
         # Plain-language evidence summary (above the raw evidence dropdown)
         ev = a.get('data') if isinstance(a.get('data'), dict) else {}
@@ -565,13 +766,12 @@ else:
             ev_lines.append("Evidence: derived from Suricata/Zeek artifacts; see raw evidence for details.")
 
         if ev_lines:
-            body.append('<div class="muted" style="margin-top:6px">' + html.escape(' '.join(ev_lines)) + '</div>')
+            body.append('<div class="muted" style="margin:8px 0;padding:10px;background:var(--bg);border-radius:6px">' + html.escape(' '.join(ev_lines)) + '</div>')
 
-        body.append('<details><summary>evidence (raw)</summary>')
+        body.append('<details><summary>View raw evidence</summary>')
         body.append('<pre>' + html.escape(json.dumps(a['data'], indent=2, sort_keys=True)) + '</pre>')
         body.append('</details>')
 
-        body.append('<div class="row" style="align-items:center;margin-top:10px">')
         # Verdict drop-down is treated as the user's final verdict.
         # Prefer latest saved feedback verdict (any day), else fall back to digest suggestion.
         vv = 'unsure'
@@ -604,6 +804,7 @@ else:
             sel = ' selected' if vv == val else ''
             return f'<option value="{val}"{sel}>{html.escape(label)}</option>'
 
+        body.append('<div class="row" style="margin-top:12px">')
         body.append(
             f'<label>Verdict: <select id="verdict-{did}">'
             + opt('unsure','unsure')
@@ -713,24 +914,26 @@ else:
         except Exception:
             draft_note = "Unable to draft comments."
 
-        body.append(f'<div style="margin-top:10px"><label>Comment / context:<br><textarea id="note-{did}" placeholder="(drafted when possible)">{html.escape(draft_note)}</textarea></label></div>')
+        body.append(f'<div style="margin-top:12px"><label style="display:block;margin-bottom:6px;font-weight:500">Comment / context:</label><textarea id="note-{did}" placeholder="Add notes about this alert...">{html.escape(draft_note)}</textarea></div>')
 
-        body.append('<div class="row" style="align-items:center;margin-top:10px">')
-        body.append(f'<label><input type="checkbox" id="dismiss-{did}"/> Dismiss (hide this alert)</label>')
-        body.append(f'<button onclick="onSave(\'{did}\')">Save</button>')
+        body.append('<div class="row" style="margin-top:14px">')
+        body.append(f'<label><input type="checkbox" id="dismiss-{did}"/> Dismiss</label>')
+        body.append(f'<button onclick="onSave(\'{did}\')">💾 Save</button>')
         body.append('</div>')
         body.append('</div>')
 
 body.append('</div>')
 
 body.append('<div class="card">')
-body.append('<h2>Raw roll-up (last 24 hours)</h2>')
+body.append('<h2><span class="icon">📋</span> Raw Roll-up (Last 24 Hours)</h2>')
 if report_txt.strip():
     body.append('<pre>' + html.escape(report_txt) + '</pre>')
 else:
-    body.append('<div class="muted">No report text found in the last 24 hours.</div>')
+    body.append('<div class="empty-state"><div class="icon">📋</div><p>No report data found in the last 24 hours.</p></div>')
 body.append('</div>')
 
+body.append('</div>')  # close .container
+body.append('<footer>HomeNetSec · Network Security Monitor</footer>')
 body.append(f'<script>{js}</script>')
 body.append('</body></html>')
 
