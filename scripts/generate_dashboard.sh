@@ -12,6 +12,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
 
+# Source AdGuard credentials for unknown device detection
+if [[ -f "$HOME/.openclaw/credentials/adguard.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$HOME/.openclaw/credentials/adguard.env"
+  set +a
+fi
+
 TS() { date -Is; }
 ET_DATE() { TZ=America/New_York date +%F; }
 
@@ -921,6 +929,166 @@ else:
         body.append(f'<button onclick="onSave(\'{did}\')">💾 Save</button>')
         body.append('</div>')
         body.append('</div>')
+
+body.append('</div>')
+
+# ============================================================================
+# Unknown Network Devices Panel
+# Finds devices in Zeek conn.log that aren't in AdGuard known clients
+# ============================================================================
+body.append('<div class="card">')
+
+def fetch_adguard_known_ips():
+    """Fetch known device IPs from AdGuard Home."""
+    url = os.environ.get('ADGUARD_URL', '').rstrip('/')
+    user = os.environ.get('ADGUARD_USER', '')
+    pw = os.environ.get('ADGUARD_PASS', '')
+    if not (url and user and pw):
+        return {}, {}
+    
+    try:
+        import base64
+        auth = base64.b64encode(f"{user}:{pw}".encode()).decode()
+        
+        # Login
+        login_body = json.dumps({"name": user, "password": pw}).encode('utf-8')
+        login_req = Request(f"{url}/control/login", data=login_body, method='POST')
+        login_req.add_header('Content-Type', 'application/json')
+        login_resp = urlopen(login_req, timeout=15)
+        cookies = login_resp.headers.get_all('Set-Cookie') or []
+        login_resp.read()
+        cookie = '; '.join([c.split(';', 1)[0] for c in cookies if c])
+        
+        # Get clients
+        clients_req = Request(f"{url}/control/clients")
+        clients_req.add_header('Cookie', cookie)
+        raw = urlopen(clients_req, timeout=15).read()
+        data = json.loads(raw.decode('utf-8', errors='replace'))
+        
+        ip_to_name = {}  # IP -> name
+        mac_to_name = {}  # MAC -> name
+        
+        # Configured clients
+        for c in (data.get('clients') or []):
+            if not isinstance(c, dict):
+                continue
+            name = c.get('name', '')
+            for cid in (c.get('ids') or []):
+                cid_s = str(cid).strip().lower()
+                if ':' in cid_s and len(cid_s) == 17:  # MAC
+                    mac_to_name[cid_s] = name
+                elif re.match(r'^\d+\.\d+\.\d+\.\d+$', cid_s):  # IPv4
+                    ip_to_name[cid_s] = name
+        
+        # Auto-discovered clients (runtime)
+        for c in (data.get('auto_clients') or []):
+            if not isinstance(c, dict):
+                continue
+            ip = c.get('ip', '')
+            name = c.get('name') or ip
+            if ip and re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
+                if ip not in ip_to_name:
+                    ip_to_name[ip] = name
+        
+        return ip_to_name, mac_to_name
+    except Exception as e:
+        print(f"[homenetsec] WARN: could not fetch AdGuard clients: {e}")
+        return {}, {}
+
+def get_zeek_conn_ips(workdir, day):
+    """Extract unique internal source IPs from Zeek conn.log."""
+    conn_log = os.path.join(workdir, 'zeek-flat', day, 'conn.log')
+    internal_ips = set()
+    ip_bytes = {}  # IP -> total bytes
+    
+    if not os.path.exists(conn_log):
+        return internal_ips, ip_bytes
+    
+    try:
+        with open(conn_log, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                if line.startswith('#'):
+                    continue
+                parts = line.strip().split('\t')
+                if len(parts) < 10:
+                    continue
+                src_ip = parts[2]  # id.orig_h
+                # Only internal IPs
+                if src_ip.startswith('192.168.') or src_ip.startswith('10.') or src_ip.startswith('172.'):
+                    internal_ips.add(src_ip)
+                    # Track bytes
+                    try:
+                        orig_bytes = int(parts[9]) if parts[9] not in ('-', '(empty)') else 0
+                        resp_bytes = int(parts[10]) if parts[10] not in ('-', '(empty)') else 0
+                        ip_bytes[src_ip] = ip_bytes.get(src_ip, 0) + orig_bytes + resp_bytes
+                    except (ValueError, IndexError):
+                        pass
+    except Exception as e:
+        print(f"[homenetsec] WARN: could not parse conn.log: {e}")
+    
+    return internal_ips, ip_bytes
+
+# Get data
+workdir_base = os.environ.get('HOMENETSEC_WORKDIR', '')
+if not workdir_base:
+    workdir_base = os.path.dirname(os.path.dirname(status_path))
+
+adguard_ips, adguard_macs = fetch_adguard_known_ips()
+zeek_ips, ip_bytes = get_zeek_conn_ips(workdir_base, day)
+
+# Find unknown IPs (in Zeek but not in AdGuard)
+# Exclude gateway/router IPs (typically .1)
+known_infra = {'192.168.1.1', '192.168.30.1', '192.168.40.1', '10.0.0.1'}
+unknown_ips = []
+for ip in zeek_ips:
+    if ip in known_infra:
+        continue
+    if ip not in adguard_ips:
+        unknown_ips.append({
+            'ip': ip,
+            'bytes': ip_bytes.get(ip, 0)
+        })
+
+# Sort by bytes (most traffic first)
+unknown_ips.sort(key=lambda x: x['bytes'], reverse=True)
+
+unknown_class = 'danger' if unknown_ips else 'success'
+body.append(f'<h2><span class="icon">👤</span> Unknown Network Devices <span class="metric {unknown_class}" style="margin-left:auto">{len(unknown_ips)}</span></h2>')
+
+body.append('<div class="metrics">')
+body.append(f"<div class='metric'><span class='label'>Devices in Zeek</span> {len(zeek_ips)}</div>")
+body.append(f"<div class='metric'><span class='label'>Known in AdGuard</span> {len(adguard_ips)}</div>")
+body.append(f"<div class='metric {unknown_class}'><span class='label'>Unknown</span> {len(unknown_ips)}</div>")
+body.append('</div>')
+body.append("<p class='muted small'>Unknown = seen in PCAP traffic but not in AdGuard clients list</p>")
+
+if not adguard_ips:
+    body.append('<div class="empty-state"><div class="icon">⚠️</div><p>Could not fetch AdGuard clients.<br>Set ADGUARD_URL, ADGUARD_USER, ADGUARD_PASS in environment.</p></div>')
+elif not unknown_ips:
+    body.append('<div class="empty-state"><div class="icon">✅</div><p>All devices in network traffic are known to AdGuard.</p></div>')
+else:
+    body.append('<table class="data-table" style="width:100%">')
+    body.append('<thead><tr><th>IP Address</th><th>Traffic</th><th>Status</th></tr></thead>')
+    body.append('<tbody>')
+    for ud in unknown_ips[:50]:  # Limit to 50
+        ip = ud['ip']
+        bytes_val = ud['bytes']
+        if bytes_val > 1000000:
+            traffic = f"{bytes_val/1000000:.1f} MB"
+        elif bytes_val > 1000:
+            traffic = f"{bytes_val/1000:.1f} KB"
+        else:
+            traffic = f"{bytes_val} B"
+        
+        body.append(f'<tr>')
+        body.append(f'<td><code>{html.escape(ip)}</code></td>')
+        body.append(f'<td>{html.escape(traffic)}</td>')
+        body.append(f'<td><span class="pill">unknown</span></td>')
+        body.append(f'</tr>')
+    body.append('</tbody>')
+    body.append('</table>')
+    if len(unknown_ips) > 50:
+        body.append(f"<p class='muted small'>Showing top 50 of {len(unknown_ips)} unknown devices</p>")
 
 body.append('</div>')
 
