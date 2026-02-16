@@ -5,6 +5,10 @@ set -euo pipefail
 # NOTE: This script is environment-specific (expects OpenClaw config paths). Keep secrets out of git.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source .env if present (for HOMENETSEC_WORKDIR, etc.)
+[[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
+
 WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
 PIPELINE="$ROOT_DIR/scripts/run_daily.sh"
 

@@ -10,6 +10,10 @@ set -euo pipefail
 # - User feedback is currently stored in the browser (localStorage) and can be exported.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source .env if present (for HOMENETSEC_WORKDIR, etc.)
+[[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
+
 WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
 
 # Source AdGuard credentials for unknown device detection

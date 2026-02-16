@@ -1,10 +1,11 @@
 # HomeNetSec dashboard (static)
 #
-# This service serves files generated under ../output/www (HTML + JSON) via a tiny nginx container.
+# This service serves files generated under $HOMENETSEC_WORKDIR/www (HTML + JSON) via a tiny nginx container.
 #
 # IMPORTANT:
 # - Bind only to LAN + Tailscale IPs (no 0.0.0.0) so it is not exposed publicly.
-# - Provide binds via assets/.env (NOT committed). Commit assets/.env.example instead.
+# - Configuration is read from the root .env file. Run with: docker compose --env-file ../.env
+#   Or run from the repo root: docker compose --env-file .env -f assets/dashboard-compose.yml
 
 services:
   homenetsec_dashboard_api:
@@ -15,7 +16,7 @@ services:
       - HOMENETSEC_STATE_DIR=/state
       - PYTHONDONTWRITEBYTECODE=1
     volumes:
-      - ../output/state:/state
+      - ${HOMENETSEC_WORKDIR:-../output}/state:/state
       - ./dashboard-api:/app:ro
     working_dir: /app
     entrypoint: ["/bin/sh", "-lc"]
@@ -30,8 +31,8 @@ services:
     depends_on:
       - homenetsec_dashboard_api
     volumes:
-      - ../output/www:/usr/share/nginx/html:ro
+      - ${HOMENETSEC_WORKDIR:-../output}/www:/usr/share/nginx/html:ro
       - ./dashboard-nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
-      - "${HOMENETSEC_LAN_BIND_IP:?set in assets/.env}:${HOMENETSEC_DASHBOARD_PORT:-8088}:80"
-      - "${HOMENETSEC_TS_BIND_IP:?set in assets/.env}:${HOMENETSEC_DASHBOARD_PORT:-8088}:80"
+      - "${HOMENETSEC_LAN_BIND_IP:?set in .env}:${HOMENETSEC_DASHBOARD_PORT:-8088}:80"
+      - "${HOMENETSEC_TS_BIND_IP:?set in .env}:${HOMENETSEC_DASHBOARD_PORT:-8088}:80"

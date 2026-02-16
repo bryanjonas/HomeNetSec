@@ -14,6 +14,10 @@ set -euo pipefail
 # By default, writes to $HOMENETSEC_WORKDIR/state/allowlist.local.json.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source .env if present (for HOMENETSEC_WORKDIR, etc.)
+[[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
+
 WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
 STATE_DIR="$WORKDIR/state"
 mkdir -p "$STATE_DIR"

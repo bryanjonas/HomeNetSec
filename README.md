@@ -106,9 +106,34 @@ This is used only for summary stats in the report (e.g., top clients, top blocke
 
 ## Configuration
 
+### Environment file (.env)
+
+All scripts automatically source `.env` from the repo root if present. Copy the example and customize:
+
+```bash
+cp .env.example .env
+# Edit .env with your paths
+```
+
+The `.env` file is gitignored — keep your local configuration there.
+
 ### Core environment variables
 
 - `HOMENETSEC_WORKDIR` — where PCAPs/logs/reports live (default: `./output`)
+
+### Dashboard environment variables
+
+- `HOMENETSEC_LAN_BIND_IP` — LAN IP to bind dashboard (required for dashboard)
+- `HOMENETSEC_TS_BIND_IP` — Tailscale IP to bind dashboard (required for dashboard)
+- `HOMENETSEC_DASHBOARD_PORT` — dashboard port (default: `8088`)
+- `HOMENETSEC_DASHBOARD_BASE_URL` — base URL for dashboard links (optional)
+
+**Running the dashboard:**
+
+```bash
+cd HomeNetSec
+docker compose --env-file .env -f assets/dashboard-compose.yml up -d
+```
 
 ### OPNsense PCAP ingest (environment-specific)
 

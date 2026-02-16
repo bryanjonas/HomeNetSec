@@ -14,6 +14,10 @@ TZ="America/New_York"; export TZ
 DAY="${1:-$(date +%F)}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source .env if present (for HOMENETSEC_WORKDIR, etc.)
+[[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
+
 WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
 COMPOSE_FILE="${HOMENETSEC_COMPOSE_FILE:-$ROOT_DIR/assets/docker-compose.yml}"
 RITA_CFG_HOST="${HOMENETSEC_RITA_CONFIG:-$ROOT_DIR/assets/rita-config.yaml.example}"
