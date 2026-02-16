@@ -1060,7 +1060,6 @@ body.append(f"<div class='metric'><span class='label'>Devices in Zeek</span> {le
 body.append(f"<div class='metric'><span class='label'>Known in AdGuard</span> {len(adguard_ips)}</div>")
 body.append(f"<div class='metric {unknown_class}'><span class='label'>Unknown</span> {len(unknown_ips)}</div>")
 body.append('</div>')
-body.append("<p class='muted small'>Unknown = seen in PCAP traffic but not in AdGuard clients list</p>")
 
 if not adguard_ips:
     body.append('<div class="empty-state"><div class="icon">⚠️</div><p>Could not fetch AdGuard clients.<br>Set ADGUARD_URL, ADGUARD_USER, ADGUARD_PASS in environment.</p></div>')
