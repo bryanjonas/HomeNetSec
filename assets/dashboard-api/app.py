@@ -78,6 +78,55 @@ def put_feedback():
     return jsonify({"ok": True})
 
 
+UNKNOWN_DEVICES_PATH = os.path.join(STATE_DIR, "unknown_devices_queue.json")
+
+
+def _load_unknown_devices():
+    try:
+        with open(UNKNOWN_DEVICES_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"devices": {}}
+    except Exception:
+        return {"devices": {}, "_warning": "failed_to_parse_existing"}
+
+
+def _write_unknown_devices(obj):
+    os.makedirs(os.path.dirname(UNKNOWN_DEVICES_PATH), exist_ok=True)
+    tmp = UNKNOWN_DEVICES_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, UNKNOWN_DEVICES_PATH)
+
+
+@app.get("/api/unknown_devices")
+def get_unknown_devices():
+    db = _load_unknown_devices()
+    # Return only non-dismissed devices
+    active = {ip: d for ip, d in db.get("devices", {}).items() if not d.get("dismissed")}
+    return jsonify({"devices": active, "total": len(active)})
+
+
+@app.post("/api/unknown_devices/dismiss")
+def dismiss_unknown_device():
+    data = request.get_json(force=True, silent=True) or {}
+    ip = (data.get("ip") or "").strip()
+    if not ip:
+        return jsonify({"error": "missing ip"}), 400
+    
+    db = _load_unknown_devices()
+    db.setdefault("devices", {})
+    
+    if ip in db["devices"]:
+        db["devices"][ip]["dismissed"] = True
+        db["devices"][ip]["dismissed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        _write_unknown_devices(db)
+        return jsonify({"ok": True, "ip": ip})
+    else:
+        return jsonify({"error": "device not found"}), 404
+
+
 if __name__ == "__main__":
     # For local debugging; container uses gunicorn.
     app.run(host="0.0.0.0", port=8000)

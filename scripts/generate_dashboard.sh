@@ -82,7 +82,7 @@ PY
 
 # Build the single-page dashboard at / (index.html).
 python3 - "$WWW_DIR/status.json" "$REPORTS_DIR" "$DIGEST_JSON" "$CANDIDATES_JSON" "$WORKDIR/state/feedback.json" "$WORKDIR/state/alerts_queue.json" "$WWW_DIR/index.html" <<'PY'
-import html, json, os, sys, hashlib, time, re
+import html, json, os, sys, hashlib, time, re, datetime
 from urllib.request import Request, urlopen
 
 status_path, reports_dir, digest_path, candidates_path, feedback_path, queue_path, out_path = sys.argv[1:8]
@@ -498,6 +498,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
   color: var(--text);
 }
 .alert-item.dismissed { opacity: 0.5; }
+.dismiss-btn { background: #dc3545; color: #fff; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.dismiss-btn:hover { background: #c82333; }
 textarea {
   width: 100%;
   min-height: 80px;
@@ -651,6 +653,37 @@ async function hydrate(){
 
 window.addEventListener('DOMContentLoaded', hydrate);
 window.onSave = onSave;
+
+// Unknown device dismiss
+async function dismissUnknown(ip) {
+  if (!confirm(`Dismiss unknown device ${ip}?`)) return;
+  try {
+    const r = await fetch('/api/unknown_devices/dismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip })
+    });
+    if (r.ok) {
+      // Remove from table
+      const row = document.querySelector(`tr[data-ip="${CSS.escape(ip)}"]`);
+      if (row) row.remove();
+      // Update count
+      const badge = document.querySelector('h2 .metric');
+      if (badge) {
+        const count = parseInt(badge.textContent) - 1;
+        badge.textContent = count;
+        if (count === 0) {
+          badge.className = 'metric success';
+        }
+      }
+    } else {
+      alert('Failed to dismiss device');
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+  }
+}
+window.dismissUnknown = dismissUnknown;
 """
 
 body = []
@@ -1027,39 +1060,81 @@ adguard_ips, adguard_macs = fetch_adguard_known_ips()
 zeek_ips, ip_bytes = get_zeek_conn_ips(workdir_base, day)
 
 # Find unknown IPs (in Zeek but not in AdGuard)
+# --- Persistent Unknown Device Queue ---
+# Load existing queue
+queue_path = os.path.join(workdir_base, 'state', 'unknown_devices_queue.json')
+try:
+    with open(queue_path, 'r') as f:
+        unknown_queue = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    unknown_queue = {"devices": {}}
+
 # Exclude gateway/router IPs (typically .1)
 known_infra = {'192.168.1.1', '192.168.30.1', '192.168.40.1', '10.0.0.1'}
-unknown_ips = []
+
+# Add new unknowns from today's Zeek data
 for ip in zeek_ips:
     if ip in known_infra:
         continue
-    if ip not in adguard_ips:
-        unknown_ips.append({
-            'ip': ip,
-            'bytes': ip_bytes.get(ip, 0)
+    if ip not in adguard_ips and ip not in unknown_queue.get("devices", {}):
+        # New unknown device - add to queue
+        unknown_queue.setdefault("devices", {})[ip] = {
+            "first_seen": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "last_seen": datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "bytes": ip_bytes.get(ip, 0),
+            "dismissed": False
+        }
+    elif ip in unknown_queue.get("devices", {}):
+        # Update last seen and bytes for existing entry
+        unknown_queue["devices"][ip]["last_seen"] = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        unknown_queue["devices"][ip]["bytes"] = unknown_queue["devices"][ip].get("bytes", 0) + ip_bytes.get(ip, 0)
+
+# Remove devices that are now in AdGuard (resolved)
+resolved = []
+for ip in list(unknown_queue.get("devices", {}).keys()):
+    if ip in adguard_ips:
+        resolved.append(ip)
+        del unknown_queue["devices"][ip]
+
+# Save updated queue
+import os as os_mod
+os_mod.makedirs(os.path.dirname(queue_path), exist_ok=True)
+with open(queue_path + '.tmp', 'w') as f:
+    json.dump(unknown_queue, f, indent=2)
+os_mod.replace(queue_path + '.tmp', queue_path)
+
+# Get active (non-dismissed) unknowns for display
+active_unknowns = []
+for ip, data in unknown_queue.get("devices", {}).items():
+    if not data.get("dismissed"):
+        active_unknowns.append({
+            "ip": ip,
+            "bytes": data.get("bytes", 0),
+            "first_seen": data.get("first_seen", ""),
+            "last_seen": data.get("last_seen", "")
         })
 
 # Sort by bytes (most traffic first)
-unknown_ips.sort(key=lambda x: x['bytes'], reverse=True)
+active_unknowns.sort(key=lambda x: x['bytes'], reverse=True)
 
-unknown_class = 'danger' if unknown_ips else 'success'
-body.append(f'<h2><span class="icon">👤</span> Unknown Network Devices <span class="metric {unknown_class}" style="margin-left:auto">{len(unknown_ips)}</span></h2>')
+unknown_class = 'danger' if active_unknowns else 'success'
+body.append(f'<h2><span class="icon">👤</span> Unknown Network Devices <span class="metric {unknown_class}" style="margin-left:auto">{len(active_unknowns)}</span></h2>')
 
 body.append('<div class="metrics">')
 body.append(f"<div class='metric'><span class='label'>Devices in Zeek</span> {len(zeek_ips)}</div>")
 body.append(f"<div class='metric'><span class='label'>Known in AdGuard</span> {len(adguard_ips)}</div>")
-body.append(f"<div class='metric {unknown_class}'><span class='label'>Unknown</span> {len(unknown_ips)}</div>")
+body.append(f"<div class='metric {unknown_class}'><span class='label'>Unknown (active)</span> {len(active_unknowns)}</div>")
 body.append('</div>')
 
 if not adguard_ips:
     body.append('<div class="empty-state"><div class="icon">⚠️</div><p>Could not fetch AdGuard clients.<br>Set ADGUARD_URL, ADGUARD_USER, ADGUARD_PASS in environment.</p></div>')
-elif not unknown_ips:
+elif not active_unknowns:
     body.append('<div class="empty-state"><div class="icon">✅</div><p>All devices in network traffic are known to AdGuard.</p></div>')
 else:
     body.append('<table class="data-table" style="width:100%">')
-    body.append('<thead><tr><th>IP Address</th><th>Traffic</th><th>Status</th></tr></thead>')
+    body.append('<thead><tr><th>IP Address</th><th>Total Traffic</th><th>First Seen</th><th>Dismiss</th></tr></thead>')
     body.append('<tbody>')
-    for ud in unknown_ips[:50]:  # Limit to 50
+    for ud in active_unknowns[:50]:  # Limit to 50
         ip = ud['ip']
         bytes_val = ud['bytes']
         if bytes_val > 1000000:
@@ -1068,16 +1143,18 @@ else:
             traffic = f"{bytes_val/1000:.1f} KB"
         else:
             traffic = f"{bytes_val} B"
+        first_seen = ud.get('first_seen', '')[:10]  # Date only
         
-        body.append(f'<tr>')
+        body.append(f'<tr data-ip="{html.escape(ip)}">')
         body.append(f'<td><code>{html.escape(ip)}</code></td>')
         body.append(f'<td>{html.escape(traffic)}</td>')
-        body.append(f'<td><span class="pill">unknown</span></td>')
+        body.append(f'<td>{html.escape(first_seen)}</td>')
+        body.append(f'<td><button class="dismiss-btn" onclick="dismissUnknown(\'{html.escape(ip)}\')">Dismiss</button></td>')
         body.append(f'</tr>')
     body.append('</tbody>')
     body.append('</table>')
-    if len(unknown_ips) > 50:
-        body.append(f"<p class='muted small'>Showing top 50 of {len(unknown_ips)} unknown devices</p>")
+    if len(active_unknowns) > 50:
+        body.append(f"<p class='muted small'>Showing top 50 of {len(active_unknowns)} unknown devices</p>")
 
 body.append('</div>')
 
