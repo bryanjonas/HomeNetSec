@@ -968,7 +968,7 @@ def fetch_adguard_known_ips():
         ip_to_name = {}  # IP -> name
         mac_to_name = {}  # MAC -> name
         
-        # Configured clients
+        # Configured clients only (not auto-discovered/runtime)
         for c in (data.get('clients') or []):
             if not isinstance(c, dict):
                 continue
@@ -979,16 +979,6 @@ def fetch_adguard_known_ips():
                     mac_to_name[cid_s] = name
                 elif re.match(r'^\d+\.\d+\.\d+\.\d+$', cid_s):  # IPv4
                     ip_to_name[cid_s] = name
-        
-        # Auto-discovered clients (runtime)
-        for c in (data.get('auto_clients') or []):
-            if not isinstance(c, dict):
-                continue
-            ip = c.get('ip', '')
-            name = c.get('name') or ip
-            if ip and re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
-                if ip not in ip_to_name:
-                    ip_to_name[ip] = name
         
         return ip_to_name, mac_to_name
     except Exception as e:
