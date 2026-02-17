@@ -4,7 +4,7 @@ This replaces native Zeek with a dockerized, offline workflow.
 
 ## Directory mounts (host)
 
-All paths are relative to `/home/bryan/.openclaw/workspace/netsec/`:
+All paths are relative to `/home/openclaw/.openclaw/workspace/HomeNetSec/`:
 
 - `pcaps/` — PCAP staging area (pulled from OPNsense)
 - `zeek-logs/` — Zeek output (conn.log, dns.log, ssl.log, etc.)
@@ -14,14 +14,14 @@ All paths are relative to `/home/bryan/.openclaw/workspace/netsec/`:
 ## Bring up Mongo (only when running RITA)
 
 ```bash
-cd /home/bryan/.openclaw/workspace/netsec/docker
+cd /home/openclaw/.openclaw/workspace/HomeNetSec/assets
 docker compose --profile rita up -d mongo
 ```
 
 ## Run Zeek on a PCAP (one-shot)
 
 ```bash
-cd /home/bryan/.openclaw/workspace/netsec/docker
+cd /home/openclaw/.openclaw/workspace/HomeNetSec/assets
 docker compose --profile zeek run --rm zeek-offline /pcaps/2026-02-05/lan-2026-02-05_2000.pcap
 ```
 
@@ -31,7 +31,7 @@ Output ends up in:
 ## Run RITA on Zeek logs for a day (one-shot)
 
 ```bash
-cd /home/bryan/.openclaw/workspace/netsec/docker
+cd /home/openclaw/.openclaw/workspace/HomeNetSec/assets
 docker compose --profile rita run --rm rita-batch 2026-02-05
 ```
 
@@ -42,7 +42,7 @@ You said: keep **7 days of PCAPs**.
 Suggested host cleanup (safe/recoverable if you use `trash-put`):
 
 ```bash
-find /home/bryan/.openclaw/workspace/netsec/pcaps -type f -mtime +7 -print0 | xargs -0 -r trash-put
+find /home/openclaw/.openclaw/workspace/HomeNetSec/output/pcaps -type f -mtime +7 -print0 | xargs -0 -r trash-put
 ```
 
 ## OPNsense capture service changes
