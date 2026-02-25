@@ -23,3 +23,5 @@ This skill bundles the HomeNetSec daily pipeline.
 
 - Keep secrets out of the repo/skill. Use environment variables or external credential files.
 - Keep data (PCAPs, Zeek logs, RITA DB, reports) in a configurable work directory and exclude it from git.
+- The pipeline normalizes `HOMENETSEC_WORKDIR` to an `output/` suffix; set it to the parent (e.g., `/mnt/5TB/openclaw/data/HomeNetSec`) and the scripts will write under `/output`.
+- The dashboard drafts a Comment/Context block with: why the alert was flagged, a likely explanation (or "Not available"), and synthesized prior dismissal context.
