@@ -879,7 +879,6 @@ else:
             todays = feedback_for_day.get(alert_id) if isinstance(feedback_for_day, dict) else None
             if not (isinstance(todays, dict) and (todays.get('note') or '').strip()):
                 # 1) Primary explanation based on evidence
-                expl = []
                 kind_label = (a.get('data') or {}).get('kind') if isinstance(a.get('data'), dict) else a.get('kind')
                 left = f"{src_name} ({src_ip})" if src_name and src_ip else (src_ip or src_name)
                 right = dst_ip or ''
@@ -890,36 +889,62 @@ else:
                 elif rdns:
                     right += f" (rDNS: {rdns})"
 
-                if left or right:
-                    expl.append(f"Observation: {left} → {right}.".strip())
+                obs = f"Observed {left} → {right}.".strip() if (left or right) else ""
+
+                why_bits = []
+                if obs:
+                    why_bits.append(obs)
+
+                why_flagged = ''
+                try:
+                    why_flagged = (a.get('data') or {}).get('why_flagged') if isinstance(a.get('data'), dict) else ''
+                except Exception:
+                    why_flagged = ''
 
                 if kind_label == 'rita_beacon':
                     # pull a couple useful notes
                     bpc = next((n for n in (notes or []) if isinstance(n, str) and 'bytes_per_conn' in n), '')
-                    interval = ''
-                    try:
-                        interval = str((a.get('data') or {}).get('why_flagged') or '')
-                    except Exception:
-                        interval = ''
                     extra = []
                     if novelty:
                         extra.append("new for this device")
                     if bpc:
                         extra.append(bpc)
-                    if interval:
-                        extra.append(interval)
+                    if isinstance(why_flagged, dict):
+                        wf = why_flagged
+                        extra.append(f"RITA score={wf.get('rita_score')} interval={wf.get('top_interval')} conns={wf.get('connections')}")
+                    elif isinstance(why_flagged, str) and why_flagged.strip():
+                        extra.append(why_flagged.strip())
                     if extra:
-                        expl.append("Why flagged: " + "; ".join(extra) + ".")
+                        why_bits.append("Flagged because " + "; ".join(extra) + ".")
+                else:
+                    if isinstance(why_flagged, dict):
+                        wf = why_flagged
+                        why_bits.append(f"Flagged because score={wf.get('rita_score')}, interval={wf.get('top_interval')}, conns={wf.get('connections')}.")
+                    elif isinstance(why_flagged, str) and why_flagged.strip():
+                        why_bits.append(f"Flagged because {why_flagged.strip()}.")
 
-                # quick benign-ish heuristics
-                if domain and domain.endswith('.pool.ntp.org'):
-                    expl.append("Most likely NTP pool traffic (routine time sync).")
-                if dst_ip and str(dst_ip).startswith('162.159.'):
-                    expl.append("Destination is in Cloudflare space; could still be normal (NTP/CDN), but confirm expected.")
+                if not why_bits:
+                    why_text = "Why flagged: Not available."
+                else:
+                    why_text = "Why flagged: " + " ".join(why_bits).strip()
+
+                # Likely explanation (narrative)
+                likely = ''
+                try:
+                    likely = (a.get('data') or {}).get('most_likely_explanation') if isinstance(a.get('data'), dict) else ''
+                except Exception:
+                    likely = ''
+                if not (isinstance(likely, str) and likely.strip()):
+                    if domain and domain.endswith('.pool.ntp.org'):
+                        likely = "Likely routine NTP pool traffic (time sync)."
+                    elif dst_port == 123:
+                        likely = "Likely NTP time synchronization." 
+                    else:
+                        likely = "Not available"
 
                 # 2) Incorporate useful context from dismissed similar alerts (any day)
+                sim_notes = []
                 try:
-                    sim_notes = []
                     kind_prefix = ''
                     if isinstance(a.get('data'), dict) and (a.get('data') or {}).get('kind'):
                         kind_prefix = str((a.get('data') or {}).get('kind'))
@@ -949,13 +974,16 @@ else:
                                 sim_notes.append(note)
                         if len(sim_notes) >= 2:
                             break
-
-                    if sim_notes:
-                        expl.append("Related prior dismissals (context): " + " | ".join(sim_notes))
                 except Exception:
-                    pass
+                    sim_notes = []
 
-                draft_note = "\n".join([x for x in expl if x and not _is_useless_note(x)])
+                context_text = "Prior context: " + (" | ".join(sim_notes) if sim_notes else "Not available")
+
+                draft_note = "\n".join([
+                    why_text.strip(),
+                    f"Likely explanation: {likely.strip()}",
+                    context_text.strip(),
+                ])
 
                 if not draft_note.strip():
                     draft_note = "Unable to draft comments."
