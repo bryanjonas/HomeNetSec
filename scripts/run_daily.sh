@@ -19,6 +19,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
 
 WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
+if [[ "${WORKDIR##*/}" != "output" ]]; then
+  WORKDIR="$WORKDIR/output"
+fi
 COMPOSE_FILE="${HOMENETSEC_COMPOSE_FILE:-$ROOT_DIR/assets/docker-compose.yml}"
 RITA_CFG_HOST="${HOMENETSEC_RITA_CONFIG:-$ROOT_DIR/assets/rita-config.yaml.example}"
 

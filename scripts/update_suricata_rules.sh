@@ -7,6 +7,9 @@ set -euo pipefail
 DAY=${1:-}
 
 WORKDIR=${HOMENETSEC_WORKDIR:-"$(cd "$(dirname "$0")/.." && pwd)/output"}
+if [[ "${WORKDIR##*/}" != "output" ]]; then
+  WORKDIR="$WORKDIR/output"
+fi
 RULESDIR="$WORKDIR/suricata-rules"
 
 mkdir -p "$RULESDIR"

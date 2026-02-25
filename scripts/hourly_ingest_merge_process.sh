@@ -23,6 +23,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
 
 WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
+if [[ "${WORKDIR##*/}" != "output" ]]; then
+  WORKDIR="$WORKDIR/output"
+fi
 STATE_DIR="$WORKDIR/state"
 mkdir -p "$STATE_DIR"
 

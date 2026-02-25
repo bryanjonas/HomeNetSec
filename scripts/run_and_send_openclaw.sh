@@ -10,6 +10,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
 
 WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
+if [[ "${WORKDIR##*/}" != "output" ]]; then
+  WORKDIR="$WORKDIR/output"
+fi
 PIPELINE="$ROOT_DIR/scripts/run_daily.sh"
 
 CONFIG_JSON="${OPENCLAW_CONFIG_JSON:-$HOME/.openclaw/openclaw.json}"
