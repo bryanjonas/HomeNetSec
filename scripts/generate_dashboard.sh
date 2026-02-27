@@ -675,7 +675,7 @@ async function dismissUnknown(ip) {
       const row = document.querySelector(`tr[data-ip="${CSS.escape(ip)}"]`);
       if (row) row.remove();
       // Update count
-      const badge = document.querySelector('h2 .metric');
+      const badge = document.getElementById('unknown-devices-count');
       if (badge) {
         const count = parseInt(badge.textContent) - 1;
         badge.textContent = count;
@@ -1153,7 +1153,7 @@ for ip, data in unknown_queue.get("devices", {}).items():
 active_unknowns.sort(key=lambda x: x['bytes'], reverse=True)
 
 unknown_class = 'danger' if active_unknowns else 'success'
-body.append(f'<h2><span class="icon">👤</span> Unknown Network Devices <span class="metric {unknown_class}" style="margin-left:auto">{len(active_unknowns)}</span></h2>')
+body.append(f'<h2><span class="icon">👤</span> Unknown Network Devices <span class="metric {unknown_class}" id="unknown-devices-count" style="margin-left:auto">{len(active_unknowns)}</span></h2>')
 
 body.append('<div class="metrics">')
 body.append(f"<div class='metric'><span class='label'>Devices in Zeek</span> {len(zeek_ips)}</div>")

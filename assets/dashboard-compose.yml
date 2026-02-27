@@ -23,6 +23,12 @@ services:
     command: >
       'pip install --no-cache-dir flask gunicorn >/dev/null &&
        exec gunicorn -w 1 -b 0.0.0.0:8000 app:app'
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   homenetsec_dashboard:
     image: nginx:alpine
