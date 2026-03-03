@@ -36,17 +36,12 @@ MERGED_PCAP_RETENTION_DAYS="${MERGED_PCAP_RETENTION_DAYS:-2}"
 HOURLY_ARTIFACT_RETENTION_DAYS="${HOURLY_ARTIFACT_RETENTION_DAYS:-3}"
 
 
-# OPNsense pull settings
-# Do not hardcode host-specific IPs; require explicit configuration.
-OPNSENSE_HOST="${OPNSENSE_HOST:?OPNSENSE_HOST must be set (OPNsense host/IP)}"
-OPNSENSE_USER="${OPNSENSE_USER:-openclaw}"
-OPNSENSE_KEY="${OPNSENSE_KEY:-$HOME/.ssh/openclaw-opnsense}"
-OPNSENSE_PCAP_DIR="${OPNSENSE_PCAP_DIR:-/var/log/pcaps}"
+# PCAP source directory (local)
+PCAP_SOURCE_DIR="${PCAP_SOURCE_DIR:-/mnt/5TB/pcaps}"
 
 # Partial protections
 PULL_SKIP_NEWEST_N="${PULL_SKIP_NEWEST_N:-1}"
 SAFETY_LAG_SECONDS="${SAFETY_LAG_SECONDS:-120}"  # don't consider anything newer than now-lag
-REMOTE_STABILITY_SECONDS="${REMOTE_STABILITY_SECONDS:-15}"  # file size+mtime must be stable across this interval
 
 require() {
   command -v "$1" >/dev/null 2>&1 || { echo "[homenetsec] ERROR: missing dependency: $1" >&2; exit 127; }
@@ -145,52 +140,6 @@ PY
 )
 mapfile -t days <<< "$days_list"
 
-# NOTE: OPNsense often runs a non-interactive SSH account for PCAP pulls.
-# To support that, we use SFTP (no remote shell commands).
-sftp_base=(sftp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=12)
-
-sftp_ls() {
-  # Lists remote paths (supports globs) one-per-line.
-  # Returns 0 even if no matches; returns nonzero on auth/network errors.
-  local remote_glob="$1"
-  local out
-  if ! out=$(printf 'ls -1 %s\n' "$remote_glob" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" 2>/dev/null); then
-    return 1
-  fi
-  # Filter out sftp prompts/noise; keep only absolute paths.
-  printf '%s\n' "$out" | sed -n '/^\//p' | sed '/^$/d'
-}
-
-sftp_ls_long_one() {
-  # Best-effort long listing for a single remote file.
-  # We just compare the resulting line text for stability.
-  local remote_path="$1"
-  local out
-  if ! out=$(printf 'ls -l %s\n' "$remote_path" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" 2>/dev/null); then
-    return 1
-  fi
-  # Return the first line that looks like a permission string.
-  printf '%s\n' "$out" | sed -n '/^-[rwx-]/p' | head -n 1
-}
-
-remote_is_stable() {
-  # Checks remote file stability across REMOTE_STABILITY_SECONDS.
-  # Because we can't run remote stat(1), we compare the `sftp ls -l` output line.
-  local remote_path="$1"
-  local a b
-  a=$(sftp_ls_long_one "$remote_path" || true)
-  [[ -z "$a" ]] && return 1
-  sleep "$REMOTE_STABILITY_SECONDS"
-  b=$(sftp_ls_long_one "$remote_path" || true)
-  [[ -z "$b" ]] && return 1
-  [[ "$a" == "$b" ]]
-}
-
-sftp_get() {
-  local remote_path="$1"
-  local local_path="$2"
-  printf 'get %s %s\n' "$remote_path" "$local_path" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" >/dev/null
-}
 
 epoch_from_basename() {
   # Extract epoch from lan-YYYY-MM-DD_HH-MM-SS.pcap...
@@ -208,23 +157,22 @@ dt=datetime.datetime(d.year,d.month,d.day,int(m.group(2)),int(m.group(3)),int(m.
 print(int(dt.timestamp()))' "$bn"
 }
 
-# 1) Build remote list (across all relevant days)
+# 1) Build source file list (from local PCAP_SOURCE_DIR across all relevant days)
 all_files=""
 for day in "${days[@]}"; do
   [[ -z "$day" ]] && continue
-  if ! part=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${day}_*.pcap*" | sort); then
-    echo "[homenetsec] ERROR: SFTP list failed for day=$day ($OPNSENSE_USER@$OPNSENSE_HOST:$OPNSENSE_PCAP_DIR)" >&2
-    exit 1
-  fi
-  [[ -n "$part" ]] && all_files+="$part"$'\n'
+  # List all matching files for this day pattern
+  while IFS= read -r -d '' filepath; do
+    all_files+="$filepath"$'\n'
+  done < <(find "$PCAP_SOURCE_DIR" -maxdepth 1 -type f -name "lan-${day}_*.pcap*" -print0 2>/dev/null | sort -z)
 done
 
 if [[ -z "$all_files" ]]; then
-  echo "[homenetsec] No remote pcaps found (days=${days[0]:-?}..${days[-1]:-?})."
+  echo "[homenetsec] No source pcaps found in $PCAP_SOURCE_DIR (days=${days[0]:-?}..${days[-1]:-?})."
   exit 0
 fi
 
-# 2) Filter remote list into candidates:
+# 2) Filter source file list into candidates:
 # - eligible fresh files: (last_contig_epoch, cutoff_epoch]
 # - plus any pending epochs <= cutoff_epoch (even if older)
 # - apply PULL_SKIP_NEWEST_N only to the newest N of the FRESH set (not pending)
@@ -370,10 +318,9 @@ if (( ${#use_idxs[@]} == 0 )); then
   exit 0
 fi
 
-# 2) Download missing and track local paths for merge
+# 2) Copy source files to workdir and track local paths for merge
 # Strategy:
-# - Only copy remote files that appear stable (size+mtime unchanged across REMOTE_STABILITY_SECONDS)
-# - Copy to a .partial file
+# - Copy source files to a .partial file
 # - Validate by rewriting via tshark to the final path
 # - Skip/quarantine any pcap that fails validation; continue with the rest
 local_paths=()
@@ -422,56 +369,33 @@ PY
 }
 
 # Iterate selected candidate indices (pending + fresh-minus-skip)
+# NOTE: use source PCAPs directly (no per-file copies in WORKDIR).
 for idx in "${use_idxs[@]}"; do
-  remote="${candidate_paths[$idx]}"
-  base=$(basename "$remote")
+  source_file="${candidate_paths[$idx]}"
+  base=$(basename "$source_file")
   ep="${candidate_epochs[$idx]}"
-  day=$(echo "$base" | cut -d_ -f1 | sed 's/^lan-//')
-  out_dir="$WORKDIR/pcaps/$day"
-  mkdir -p "$out_dir"
-  out_path="$out_dir/$base"
 
-  # If we already have a validated local copy, include it.
-  if [[ -f "$out_path" ]]; then
-    local_paths+=("$out_path")
-    ok_epochs+=("$ep")
+  # Skip if source file doesn't exist (may have been processed in earlier run)
+  if [[ ! -f "$source_file" ]]; then
+    echo "[homenetsec] skip(not found): $source_file"
+    add_pending "$ep" "$source_file" "not_found"
     continue
   fi
 
-  if ! remote_is_stable "$remote"; then
-    echo "[homenetsec] skip(unstable): $remote"
-    add_pending "$ep" "$remote" "unstable"
-    continue
-  fi
-
-  tmp_path="$out_path.partial"
-  rm -f -- "$tmp_path" 2>/dev/null || true
-
-  echo "[homenetsec] pulling $remote"
-  if ! sftp_get "$remote" "$tmp_path"; then
-    echo "[homenetsec] WARN: sftp get failed for $remote" >&2
-    rm -f -- "$tmp_path" 2>/dev/null || true
-    add_pending "$ep" "$remote" "sftp_get_failed"
-    continue
-  fi
-
-  if tshark -r "$tmp_path" -w "$out_path" >/dev/null 2>&1; then
-    rm -f -- "$tmp_path" 2>/dev/null || true
-    local_paths+=("$out_path")
+  # Validate source file in-place (no duplicate copy); capinfos exits non-zero on invalid PCAPs.
+  if capinfos -c "$source_file" >/dev/null 2>&1; then
+    local_paths+=("$source_file")
     ok_epochs+=("$ep")
   else
-    bad_path="$out_path.bad.$(date +%s)"
-    mv -f -- "$tmp_path" "$bad_path" 2>/dev/null || true
-    rm -f -- "$out_path" 2>/dev/null || true
-    echo "[homenetsec] WARN: invalid pcap (quarantined): $bad_path" >&2
-    add_pending "$ep" "$remote" "invalid_pcap"
+    echo "[homenetsec] WARN: invalid pcap (skipping): $source_file" >&2
+    add_pending "$ep" "$source_file" "invalid_pcap"
     continue
   fi
 
 done
 
 if (( ${#local_paths[@]} == 0 )); then
-  echo "[homenetsec] No validated pcaps to merge (after stability+validation filters)."
+  echo "[homenetsec] No validated pcaps to merge (after validation filters)."
   exit 0
 fi
 
@@ -540,11 +464,7 @@ while :; do
   break
 done
 
-# Optionally delete the source PCAPs that were merged (safe only after verify_merge).
-if [[ "${DELETE_MERGED_INPUTS:-1}" == "1" ]]; then
-  echo "[homenetsec] delete_inputs: removing ${#local_paths[@]} source pcap(s) after successful merge"
-  rm -f -- "${local_paths[@]}"
-fi
+# Inputs are source PCAPs; we do not delete them here.
 
 # 4) Run Suricata + Zeek on the merged pcap
 # Suricata writes to output/suricata/$merge_day/eve.json (overwrites each run)
