@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Pull the most recent N hours worth of PCAPs from OPNsense into the local workdir.
+# Copy the most recent N hours worth of PCAPs from local source directory into the workdir.
 #
-# This is designed for frequent scheduled pulls (e.g., every 4 hours) without
-# needing to download a whole day's worth of traffic.
+# This is designed for frequent scheduled copies (e.g., every 4 hours) without
+# needing to process a whole day's worth of traffic.
 
 TZ="America/New_York"; export TZ
 
@@ -20,7 +20,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Source .env if present (for HOMENETSEC_WORKDIR, etc.)
 [[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
 
-WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
+# WORKDIR is REQUIRED - must be set in .env
+if [[ -z "${HOMENETSEC_WORKDIR:-}" ]]; then
+  echo "[homenetsec] ERROR: HOMENETSEC_WORKDIR not set. Please configure in .env file." >&2
+  exit 2
+fi
+WORKDIR="$HOMENETSEC_WORKDIR"
 if [[ "${WORKDIR##*/}" != "output" ]]; then
   WORKDIR="$WORKDIR/output"
 fi
@@ -28,34 +33,16 @@ fi
 STATE_DIR="$WORKDIR/state"
 mkdir -p "$STATE_DIR"
 
-# OPNsense pull settings
-# Do not hardcode host-specific IPs; require explicit configuration.
-OPNSENSE_HOST="${OPNSENSE_HOST:?OPNSENSE_HOST must be set (OPNsense host/IP)}"
-OPNSENSE_USER="${OPNSENSE_USER:-openclaw}"
-OPNSENSE_KEY="${OPNSENSE_KEY:-$HOME/.ssh/openclaw-opnsense}"
-OPNSENSE_PCAP_DIR="${OPNSENSE_PCAP_DIR:-/var/log/pcaps}"
+# PCAP source directory (local) - REQUIRED
+# Must be set in .env or as environment variable
+if [[ -z "${PCAP_SOURCE_DIR:-}" ]]; then
+  echo "[homenetsec] ERROR: PCAP_SOURCE_DIR not set. Please configure in .env file." >&2
+  exit 2
+fi
 
 # Avoid copying a PCAP file while tcpdump/daemon is still writing it.
-# For frequent pulls, skipping just the newest 1 is usually sufficient.
+# For frequent copies, skipping just the newest 1 is usually sufficient.
 SKIP_NEWEST_N="${PULL_SKIP_NEWEST_N:-1}"
-
-# Use SFTP to support non-interactive SSH accounts on OPNsense.
-sftp_base=(sftp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=12)
-
-sftp_ls() {
-  local remote_glob="$1"
-  local out
-  if ! out=$(printf 'ls -1 %s\n' "$remote_glob" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" 2>/dev/null); then
-    return 1
-  fi
-  printf '%s\n' "$out" | sed -n 's/^sftp> //p; /^\//p' | sed '/^$/d'
-}
-
-sftp_get() {
-  local remote_path="$1"
-  local local_path="$2"
-  printf 'get %s %s\n' "$remote_path" "$local_path" | ${sftp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST" >/dev/null
-}
 
 now_epoch=$(date +%s)
 start_epoch=$(date -d "$HOURS hours ago" +%s)
@@ -63,9 +50,9 @@ start_epoch=$(date -d "$HOURS hours ago" +%s)
 start_day=$(date -d "@$start_epoch" +%F)
 end_day=$(date -d "@$now_epoch" +%F)
 
-# Build the list of candidate remote files across the affected day(s)
+# Build the list of candidate source files across the affected day(s)
 # (handles the midnight boundary when HOURS crosses into the previous day).
-remote_list=$(python3 - <<PY
+day_list=$(python3 - <<PY
 import datetime
 sd=datetime.date.fromisoformat("$start_day")
 ed=datetime.date.fromisoformat("$end_day")
@@ -81,15 +68,11 @@ PY
 all_files=""
 while IFS= read -r day; do
   [[ -z "$day" ]] && continue
-  # Use SFTP for listing (supports globs). Fail fast on auth/network errors.
-  if ! part=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${day}_*.pcap*" | sort); then
-    echo "[homenetsec] ERROR: SFTP list failed for day=$day ($OPNSENSE_USER@$OPNSENSE_HOST:$OPNSENSE_PCAP_DIR)" >&2
-    exit 1
-  fi
-  if [[ -n "$part" ]]; then
-    all_files+="$part"$'\n'
-  fi
-done <<< "$remote_list"
+  # List local files for this day
+  while IFS= read -r -d '' filepath; do
+    all_files+="$filepath"$'\n'
+  done < <(find "$PCAP_SOURCE_DIR" -maxdepth 1 -type f -name "lan-${day}_*.pcap*" -print0 2>/dev/null | sort -z)
+done <<< "$day_list"
 
 # Filter down to just the files whose embedded timestamp lies in [start, now].
 export START_EPOCH="$start_epoch" END_EPOCH="$now_epoch"
@@ -150,16 +133,16 @@ fi
 # Skip newest N from the filtered set to avoid partial copies.
 mapfile -t files <<< "$filtered"
 if (( ${#files[@]} <= SKIP_NEWEST_N )); then
-  echo "[homenetsec] Found ${#files[@]} matching pcaps; skipping pull because SKIP_NEWEST_N=$SKIP_NEWEST_N"
+  echo "[homenetsec] Found ${#files[@]} matching pcaps; skipping copy because SKIP_NEWEST_N=$SKIP_NEWEST_N"
   exit 0
 fi
 
 upto=$(( ${#files[@]} - SKIP_NEWEST_N ))
 
 for (( i=0; i<upto; i++ )); do
-  remote="${files[$i]}"
-  [[ -z "$remote" ]] && continue
-  base=$(basename "$remote")
+  source_file="${files[$i]}"
+  [[ -z "$source_file" ]] && continue
+  base=$(basename "$source_file")
 
   # Infer day folder from filename.
   day=$(echo "$base" | cut -d_ -f1 | sed 's/^lan-//')
@@ -167,8 +150,8 @@ for (( i=0; i<upto; i++ )); do
   mkdir -p "$out_dir"
 
   if [[ ! -f "$out_dir/$base" ]]; then
-    echo "[homenetsec] pulling $remote"
-    sftp_get "$remote" "$out_dir/$base" >/dev/null
+    echo "[homenetsec] copying $source_file"
+    cp "$source_file" "$out_dir/$base"
   fi
 done
 

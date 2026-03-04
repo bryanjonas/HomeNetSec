@@ -1,6 +1,9 @@
 # OpenClaw netsec docker stack (offline Zeek + optional RITA)
 #
-# Host directory layout (bind mounts) relative to $HOMENETSEC_WORKDIR (defaults to ./output when running via scripts):
+# IMPORTANT: HOMENETSEC_WORKDIR must be set before running docker compose.
+# The scripts handle this automatically by sourcing .env.
+#
+# Host directory layout (bind mounts) relative to $HOMENETSEC_WORKDIR:
 #   pcaps/        -> PCAP staging (pulled from OPNsense)
 #   zeek-logs/    -> Zeek output logs
 #   zeek-flat/    -> Flattened Zeek logs for RITA import
@@ -36,8 +39,8 @@ services:
     restart: "no"
     working_dir: /work
     volumes:
-      - ${HOMENETSEC_WORKDIR:-./output}/zeek-logs:/out
-      - ${HOMENETSEC_WORKDIR:-./output}/pcaps:/pcaps:ro
+      - ${HOMENETSEC_WORKDIR}/zeek-logs:/out
+      - ${HOMENETSEC_WORKDIR}/pcaps:/pcaps:ro
     # NOTE: We pass the pcap path via an env var (PCAP) so `docker compose run` doesn't have to override command.
     entrypoint: ["/bin/sh", "-lc"]
     # Env var PCAP must be set by the caller, e.g. PCAP=/pcaps/2026-02-05/file.pcap
@@ -63,10 +66,10 @@ services:
     # Run as root to read PCAPs and write output; no special caps needed for offline read.
     entrypoint: ["/bin/sh", "-lc"]
     volumes:
-      - ${HOMENETSEC_WORKDIR:-./output}/pcaps:/pcaps:ro
-      - ${HOMENETSEC_WORKDIR:-./output}/suricata:/out
+      - ${HOMENETSEC_WORKDIR}/pcaps:/pcaps:ro
+      - ${HOMENETSEC_WORKDIR}/suricata:/out
       # Host-managed Suricata rule cache (populated by scripts/update_suricata_rules.sh)
-      - ${HOMENETSEC_WORKDIR:-./output}/suricata-rules:/var/lib/suricata/rules
+      - ${HOMENETSEC_WORKDIR}/suricata-rules:/var/lib/suricata/rules
     # Env vars:
     # - DAY: YYYY-MM-DD (used only to place output under /out/$DAY)
     # - PCAP: absolute path to a single pcap under /pcaps (required)
@@ -100,9 +103,9 @@ services:
     networks:
       - rita-net
     volumes:
-      - ${HOMENETSEC_WORKDIR:-./output}/zeek-logs:/logs:ro
-      - ${HOMENETSEC_WORKDIR:-./output}/zeek-flat:/logs-flat:ro
-      - ${HOMENETSEC_WORKDIR:-./output}/rita-data:/out
+      - ${HOMENETSEC_WORKDIR}/zeek-logs:/logs:ro
+      - ${HOMENETSEC_WORKDIR}/zeek-flat:/logs-flat:ro
+      - ${HOMENETSEC_WORKDIR}/rita-data:/out
     environment:
       - RITA_MONGODB_URI=mongodb://mongo:27017/rita
 

@@ -6,7 +6,12 @@ set -euo pipefail
 
 DAY=${1:-}
 
-WORKDIR=${HOMENETSEC_WORKDIR:-"$(cd "$(dirname "$0")/.." && pwd)/output"}
+# WORKDIR is REQUIRED - must be set in .env or environment
+if [[ -z "${HOMENETSEC_WORKDIR:-}" ]]; then
+  echo "[homenetsec] ERROR: HOMENETSEC_WORKDIR not set. Please configure in .env file." >&2
+  exit 2
+fi
+WORKDIR="$HOMENETSEC_WORKDIR"
 if [[ "${WORKDIR##*/}" != "output" ]]; then
   WORKDIR="$WORKDIR/output"
 fi
