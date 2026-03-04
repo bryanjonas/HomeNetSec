@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Self-check: fail fast if this script has a syntax error (prevents wasted PCAP pulls).
 if ! bash -n "$0"; then
-  echo "[homenetsec] ERROR: hourly_ingest_merge_process.sh failed bash syntax check" >&2
+  echo "[homenetsec] ERROR: pcap_ingest_merge_process.sh failed bash syntax check" >&2
   exit 2
 fi
 
@@ -22,22 +22,35 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Source .env if present (for HOMENETSEC_WORKDIR, etc.)
 [[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
 
-WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
+# WORKDIR is REQUIRED - must be set in .env
+if [[ -z "${HOMENETSEC_WORKDIR:-}" ]]; then
+  echo "[homenetsec] ERROR: HOMENETSEC_WORKDIR not set. Please configure in .env file." >&2
+  exit 2
+fi
+WORKDIR="$HOMENETSEC_WORKDIR"
 if [[ "${WORKDIR##*/}" != "output" ]]; then
   WORKDIR="$WORKDIR/output"
 fi
 STATE_DIR="$WORKDIR/state"
 mkdir -p "$STATE_DIR"
 
-STATE_JSON="$STATE_DIR/hourly_ingest_state.json"
+STATE_JSON="$STATE_DIR/ingest_state.json"
+LEGACY_STATE_JSON="$STATE_DIR/hourly_ingest_state.json"
+if [[ -f "$LEGACY_STATE_JSON" && ! -f "$STATE_JSON" ]]; then
+  mv "$LEGACY_STATE_JSON" "$STATE_JSON"
+fi
 
-# Retention
-MERGED_PCAP_RETENTION_DAYS="${MERGED_PCAP_RETENTION_DAYS:-2}"
-HOURLY_ARTIFACT_RETENTION_DAYS="${HOURLY_ARTIFACT_RETENTION_DAYS:-3}"
+# Retention (PCAPs are storage-heavy; Zeek/Suricata artifacts are small and needed for RITA's 7-day rolling window)
+MERGED_PCAP_RETENTION_DAYS="${MERGED_PCAP_RETENTION_DAYS:-3}"
+HOURLY_ARTIFACT_RETENTION_DAYS="${HOURLY_ARTIFACT_RETENTION_DAYS:-30}"
 
 
-# PCAP source directory (local)
-PCAP_SOURCE_DIR="${PCAP_SOURCE_DIR:-/mnt/5TB/pcaps}"
+# PCAP source directory (local) - REQUIRED
+# Must be set in .env or as environment variable
+if [[ -z "${PCAP_SOURCE_DIR:-}" ]]; then
+  echo "[homenetsec] ERROR: PCAP_SOURCE_DIR not set. Please configure in .env file." >&2
+  exit 2
+fi
 
 # Partial protections
 PULL_SKIP_NEWEST_N="${PULL_SKIP_NEWEST_N:-1}"
@@ -464,7 +477,14 @@ while :; do
   break
 done
 
-# Inputs are source PCAPs; we do not delete them here.
+# Delete source PCAPs after successful merge
+echo "[homenetsec] deleting ${#local_paths[@]} source pcaps after successful merge"
+for source_file in "${local_paths[@]}"; do
+  if [[ -f "$source_file" ]]; then
+    echo "[homenetsec]   deleting: $source_file"
+    rm -f "$source_file"
+  fi
+done
 
 # 4) Run Suricata + Zeek on the merged pcap
 # Suricata writes to output/suricata/$merge_day/eve.json (overwrites each run)
@@ -587,20 +607,20 @@ json.dump(j, open(p,'w',encoding='utf-8'), indent=2)
 print(p)
 PY
 
-echo "[homenetsec] hourly ingest complete (contiguous_epoch=$new_contig high_watermark=$new_high pending=$(python3 - <<PY
+echo "[homenetsec] ingest pipeline complete (contiguous_epoch=$new_contig high_watermark=$new_high pending=$(python3 - <<PY
 import json
 print(len(json.loads('''$pending_final_json''') if '''$pending_final_json'''.strip() else '[]'))
 PY
 ))"
 
 # 6) Retention cleanup
-# - merged PCAPs: 7 days
-# - Zeek logs + Suricata EVE outputs from hourly merged runs: 30 days
+# - merged PCAPs: configurable (default 3 days to conserve disk)
+# - Zeek logs + Suricata EVE outputs: configurable (default 30 days for RITA's 7-day rolling window + baseline analysis)
 if [[ "${RUN_RETENTION_CLEANUP:-1}" == "1" ]]; then
   echo "[homenetsec] retention: merged pcaps older than ${MERGED_PCAP_RETENTION_DAYS} days"
   find "$WORKDIR/pcaps" -type f -name 'merged-*.pcap' -mtime +"$MERGED_PCAP_RETENTION_DAYS" -print0 | xargs -0 -r rm -f
 
-  echo "[homenetsec] retention: hourly zeek/suricata artifacts older than ${HOURLY_ARTIFACT_RETENTION_DAYS} days"
+  echo "[homenetsec] retention: ingest zeek/suricata artifacts older than ${HOURLY_ARTIFACT_RETENTION_DAYS} days"
   # Zeek per-merge output dirs end with .zeek
   find "$WORKDIR/zeek-logs" -type d -name '*.zeek' -mtime +"$HOURLY_ARTIFACT_RETENTION_DAYS" -print0 | xargs -0 -r rm -rf
   # Suricata per-merge eve files
@@ -610,4 +630,3 @@ fi
 # 7) Update dashboard pages (best-effort)
 ( cd "$ROOT_DIR" && HOMENETSEC_WORKDIR="$WORKDIR" ./scripts/generate_dashboard.sh ) || \
   echo "[homenetsec] WARN: dashboard generation failed"
-

@@ -14,15 +14,12 @@ The intent is not to repeat every line of code, but to capture:
 ## 1) Inputs and external dependencies
 
 ### 1.1 PCAP source (network telemetry)
-- Source host: **OPNsense** (separate host)
-- Remote directory: `${OPNSENSE_PCAP_DIR:-/var/log/pcaps}`
+- Source directory: `${PCAP_SOURCE_DIR}` (local, required - must be configured in `.env`)
 - File naming convention:
   - `lan-YYYY-MM-DD_HH-MM-SS.pcap000`
   - `lan-YYYY-MM-DD_HH-MM-SS.pcap001` (size-based rollover)
 
-**Important constraint:** the SSH account used for pulling PCAPs may be locked down (no interactive shell).
-
-Therefore, HomeNetSec uses **SFTP** (not `ssh <cmd>`), so it can operate with a non-shell account.
+HomeNetSec copies PCAPs from a local source directory and processes them into the workdir.
 
 ### 1.2 DNS telemetry (resolver context)
 - DNS telemetry is pulled from **AdGuard Home** via its HTTP API.
@@ -64,19 +61,19 @@ Repo policy: runtime outputs are not committed.
 
 HomeNetSec is intentionally split so the **download/processing pipeline** can be scheduled separately from the **analysis pipeline**.
 
-### 3.1 Download + processing pipeline (PCAP ingest → merge → Suricata + Zeek)
+### 3.1 Copy + processing pipeline (PCAP ingest → merge → Suricata + Zeek)
 Entry point:
-- `scripts/hourly_ingest_merge_process.sh`
+- `scripts/pcap_ingest_merge_process.sh`
 
 Goal:
 - incrementally ingest new PCAP segments, merge them into a single PCAP batch, and run Suricata+Zeek on the merged batch.
 
 Typical cadence:
-- hourly (top of hour)
+- whenever new PCAP segments land (your cron cadence, e.g., every 8 hours)
 
 ### 3.2 Analysis + dashboard pipeline (RITA/reporting → triage digest → dashboard)
 Entry points:
-- `scripts/run_daily.sh` (reporting layer)
+- `scripts/run_analysis_pipeline.sh` (reporting layer)
 - `scripts/triage_digest.py` (deterministic digest enrichment + suppression)
 - `scripts/generate_dashboard.sh` (static dashboard generation)
 
@@ -84,7 +81,7 @@ Goal:
 - update baselines/candidates, run RITA over flattened Zeek logs, enrich into a deterministic triage digest, and refresh the dashboard.
 
 Typical cadence:
-- 2×/day (e.g., morning/evening), or hourly if you want near-real-time dashboard updates
+- whenever you refresh the analysis/reporting outputs (daily, every cron run, or however often you need fresh dashboards)
 
 Important property:
 - This pipeline does *not* need to pull PCAPs and does *not* rerun Zeek/Suricata; it consumes outputs produced by the download/processing pipeline.
@@ -96,23 +93,22 @@ Entry point:
 Goal:
 - run analysis steps and optionally send a Telegram message with a dashboard link.
 
-Delivery is intentionally separable: you can run analysis hourly and choose when/if to send messages.
+Delivery is intentionally separable: you can run analysis on whatever cadence makes sense and choose when/if to send messages.
 
 ---
 
-## 4) Hourly ingest details (gap-safe SFTP pull)
+## 4) Ingest pipeline details (gap-safe local copy)
 
 ### 4.1 Partial protections
-The hourly job must avoid copying files that are still being written.
-It applies multiple “partial protections”:
+The ingest job must avoid copying files that are still being written.
+It applies multiple "partial protections":
 
 - `SAFETY_LAG_SECONDS` (default 120s): ignore files newer than `now - lag`.
 - `PULL_SKIP_NEWEST_N` (default 1): after time filtering, skip the newest N eligible files.
-- Remote stability check: compare `sftp ls -l` output twice across `REMOTE_STABILITY_SECONDS`.
 
 ### 4.2 Gap-safe state model (Option 2)
 State file:
-- `$HOMENETSEC_WORKDIR/state/hourly_ingest_state.json`
+- `$HOMENETSEC_WORKDIR/state/ingest_state.json` (legacy `hourly_ingest_state.json` is migrated automatically)
 
 Key fields:
 - `last_contiguous_epoch`: safe watermark (only advances when all eligible epochs up to it are validated)
@@ -124,7 +120,7 @@ Why this exists:
 
 ### 4.3 Selection logic summary
 Each run:
-1) Lists remote segments for all relevant days via **SFTP**.
+1) Lists source files from local PCAP_SOURCE_DIR for all relevant days.
 2) Parses an epoch from each filename.
 3) Builds candidates:
    - fresh eligible: `last_contiguous_epoch < epoch <= cutoff_epoch`
@@ -133,7 +129,7 @@ Each run:
 5) Processes all pending candidates + remaining fresh candidates.
 
 ### 4.4 Local validation
-Downloads are staged as `*.partial` and then rewritten via:
+Source files are copied to workdir and staged as `*.partial`, then rewritten via:
 - `tshark -r partial -w final`
 
 If tshark fails:
@@ -149,9 +145,10 @@ Merge verification:
 - can retry merge+verify (`MERGE_RETRIES`)
 
 After verified merge:
-- optionally deletes source segments (`DELETE_MERGED_INPUTS=1`)
+- optionally deletes workdir segments (`DELETE_MERGED_INPUTS=1`)
+- deletes source files from PCAP_SOURCE_DIR
 
-### 4.6 Hourly processing
+### 4.6 Ingest processing
 For the merged PCAP:
 - Suricata offline writes:
   - EVE JSON (TLS enabled; may include alert events depending on config)
@@ -163,16 +160,16 @@ For the merged PCAP:
 ## 5) Reporting layer (schedule independently from ingest)
 
 Entry points:
-- `scripts/run_daily.sh`
+- `scripts/run_analysis_pipeline.sh`
 - (optional wrapper) `scripts/run_and_send_openclaw.sh`
 
 The reporting layer:
-1) runs `run_daily.sh` in report-only mode:
+1) runs `run_analysis_pipeline.sh` in report-only mode:
    - `SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0`
 2) updates baseline DB and anomaly candidates
 3) writes daily report text: `output/reports/YYYY-MM-DD.txt`
 
-This layer can run hourly or 2×/day. It assumes Zeek logs have already been produced by the download/processing pipeline.
+This layer can run on whatever cadence you need (daily, every cron run, etc.). It assumes Zeek logs have already been produced by the download/processing pipeline.
 
 Candidate detection:
 - `scripts/detect_candidates.py` (baseline-driven)
@@ -193,7 +190,7 @@ Generator:
 - `scripts/generate_dashboard.sh`
 
 The root page (`/`) is a single-page dashboard showing:
-- hourly ingest status
+- ingest status
 - **active alerts queue** (alerts remain until dismissed; not day-scoped)
 - per-alert feedback (verdict + comment + dismiss)
 - raw daily roll-up text
@@ -219,6 +216,9 @@ Daily wrapper sends:
 Script:
 - `scripts/run_and_send_openclaw.sh`
 
+Notes:
+- `RUN_INGEST_BEFORE_REPORT=0` disables the ingest pipeline run that normally precedes the analysis/reporting steps inside the wrapper (useful if your cron already handled the ingest pipeline).
+
 ---
 
 ## 8) Security & privacy rules
@@ -232,9 +232,9 @@ Script:
 
 ## 9) Where to look (repo map)
 
-- Hourly ingest (SFTP pull + gap-safe state): `scripts/hourly_ingest_merge_process.sh`
-- Daily reporting orchestration: `scripts/run_and_send_openclaw.sh`
-- Report generation + candidates: `scripts/run_daily.sh`, `scripts/detect_candidates.py`, `scripts/baseline_update.py`
+- Ingest pipeline (local copy + gap-safe state): `scripts/pcap_ingest_merge_process.sh`
+- Reporting orchestration (Telegram wrapper): `scripts/run_and_send_openclaw.sh`
+- Report generation + candidates: `scripts/run_analysis_pipeline.sh`, `scripts/detect_candidates.py`, `scripts/baseline_update.py`
 - Docker tool stack: `assets/docker-compose.yml`
 - Dashboard generator: `scripts/generate_dashboard.sh`
 - Allowlist management helper: `scripts/allowlist_manage.sh`

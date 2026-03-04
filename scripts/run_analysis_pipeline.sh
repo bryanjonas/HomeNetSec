@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# HomeNetSec daily pipeline (dockerized)
-# - Pull PCAPs from OPNsense via SSH
+# HomeNetSec analysis/reporting pipeline (dockerized)
+# - Copy PCAPs from local source directory
 # - Run Zeek offline in Docker per PCAP
 # - Flatten Zeek logs for RITA
 # - Run RITA (docker) backed by MongoDB (docker)
@@ -18,7 +18,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Source .env if present (for HOMENETSEC_WORKDIR, etc.)
 [[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
 
-WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
+# WORKDIR is REQUIRED - must be set in .env
+if [[ -z "${HOMENETSEC_WORKDIR:-}" ]]; then
+  echo "[homenetsec] ERROR: HOMENETSEC_WORKDIR not set. Please configure in .env file." >&2
+  exit 2
+fi
+WORKDIR="$HOMENETSEC_WORKDIR"
 if [[ "${WORKDIR##*/}" != "output" ]]; then
   WORKDIR="$WORKDIR/output"
 fi
@@ -36,18 +41,21 @@ CANDIDATES_PATH="$STATE_DIR/${DAY}.candidates.json"
 JA4DB_PATH="${JA4DB_PATH:-$STATE_DIR/ja4+_db.json}"
 REPORT_PATH="$REPORT_DIR/$DAY.txt"
 
-# OPNsense pull settings
-# Do not hardcode host-specific IPs; require explicit configuration.
-OPNSENSE_HOST="${OPNSENSE_HOST:?OPNSENSE_HOST must be set (OPNsense host/IP)}"
-OPNSENSE_USER="${OPNSENSE_USER:-openclaw}"
-OPNSENSE_KEY="${OPNSENSE_KEY:-$HOME/.ssh/openclaw-opnsense}"
-OPNSENSE_PCAP_DIR="${OPNSENSE_PCAP_DIR:-/var/log/pcaps}"
+# PCAP source directory (local) - REQUIRED
+# Must be set in .env or as environment variable
+if [[ -z "${PCAP_SOURCE_DIR:-}" ]]; then
+  echo "[homenetsec] ERROR: PCAP_SOURCE_DIR not set. Please configure in .env file." >&2
+  exit 2
+fi
 
 # Controls
 RUN_RITA="${RUN_RITA:-1}"
 RUN_JA4="${RUN_JA4:-1}"  # run Suricata offline TLS fingerprint extraction
 PCAP_RETENTION_DAYS="${PCAP_RETENTION_DAYS:-2}"
-ZEEK_LOG_RETENTION_DAYS="${ZEEK_LOG_RETENTION_DAYS:-3}"
+ZEEK_LOG_RETENTION_DAYS="${ZEEK_LOG_RETENTION_DAYS:-30}"
+
+# RITA analysis window (days): 7=good, 14=better for beacons, 30=best for low-and-slow
+RITA_ROLLING_WINDOW_DAYS="${RITA_ROLLING_WINDOW_DAYS:-14}"
 
 mkdir -p "$PCAP_DIR" "$ZEEK_ROOT" "$ZEEK_FLAT_ROOT" "$RITA_DATA_DIR" "$REPORT_DIR" "$STATE_DIR"
 
@@ -64,7 +72,7 @@ compose() {
 
 pull_pcaps() {
   if [[ "${SKIP_PCAP_PULL:-0}" == "1" ]]; then
-    echo "[homenetsec] SKIP_PCAP_PULL=1 (skipping PCAP pull step)"
+    echo "[homenetsec] SKIP_PCAP_PULL=1 (skipping PCAP copy step)"
     return 0
   fi
 
@@ -72,104 +80,81 @@ pull_pcaps() {
   # Default: skip the newest 2 matching files (configurable).
   local skip_newest_n="${PULL_SKIP_NEWEST_N:-2}"
 
-  local list
-  local -a sftp_base
-  sftp_base=(sftp -i "$OPNSENSE_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=12)
+  # List all matching files from source directory
+  local -a files=()
+  while IFS= read -r -d '' filepath; do
+    files+=("$filepath")
+  done < <(find "$PCAP_SOURCE_DIR" -maxdepth 1 -type f -name "lan-${DAY}_*.pcap*" -print0 2>/dev/null | sort -z)
 
-  sftp_ls() {
-    local remote_glob="$1"
-    local out
-    if ! out=$(printf 'ls -1 %s\n' "$remote_glob" | "${sftp_base[@]}" "$OPNSENSE_USER@$OPNSENSE_HOST" 2>/dev/null); then
-      return 1
-    fi
-    printf '%s\n' "$out" | sed -n 's/^sftp> //p; /^\//p' | sed '/^$/d'
-  }
-
-  sftp_get() {
-    local remote_path="$1"
-    local local_path="$2"
-    printf 'get %s %s\n' "$remote_path" "$local_path" | "${sftp_base[@]}" "$OPNSENSE_USER@$OPNSENSE_HOST" >/dev/null
-  }
-
-  # Filenames embed timestamps, so lexicographic sort corresponds to time order.
-  # IMPORTANT: if listing fails (auth/network/permissions), fail fast.
-  if ! list=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap*" | sort); then
-    echo "[homenetsec] ERROR: PCAP pull failed (SFTP to $OPNSENSE_USER@$OPNSENSE_HOST could not list $OPNSENSE_PCAP_DIR)."
-    echo "[homenetsec]        Fix SSH/SFTP auth/permissions or set SKIP_PCAP_PULL=1 if you are using local pcaps."
-    return 1
-  fi
-
-  if [[ -z "$list" ]]; then
-    echo "[homenetsec] No pcaps found on OPNsense for $DAY."
+  if (( ${#files[@]} == 0 )); then
+    echo "[homenetsec] No pcaps found in $PCAP_SOURCE_DIR for $DAY."
     return 0
   fi
 
-  mapfile -t files <<< "$list"
   local total=${#files[@]}
   if (( total <= skip_newest_n )); then
-    echo "[homenetsec] Found $total pcaps; skipping pull because skip_newest_n=$skip_newest_n"
+    echo "[homenetsec] Found $total pcaps; skipping copy because skip_newest_n=$skip_newest_n"
     return 0
   fi
 
   local upto=$(( total - skip_newest_n ))
   local i
   for (( i=0; i<upto; i++ )); do
-    local remote="${files[$i]}"
-    [[ -z "$remote" ]] && continue
+    local source_file="${files[$i]}"
+    [[ -z "$source_file" ]] && continue
 
     local base
-    base=$(basename "$remote")
+    base=$(basename "$source_file")
     if [[ ! -f "$PCAP_DIR/$base" ]]; then
-      echo "[homenetsec] pulling $remote"
-      sftp_get "$remote" "$PCAP_DIR/$base" >/dev/null
+      echo "[homenetsec] copying $source_file"
+      cp "$source_file" "$PCAP_DIR/$base"
     fi
   done
 
-  echo "[homenetsec] pull complete (skipped newest $skip_newest_n file(s) to avoid partial copies)"
+  echo "[homenetsec] copy complete (skipped newest $skip_newest_n file(s) to avoid partial copies)"
 
   # Verification pass: ensure we didn't miss any expected files before continuing.
   # Default on; can be disabled for ad-hoc runs.
   if [[ "${VERIFY_PCAP_PULL:-1}" == "1" ]]; then
-    local verify_list
-    if ! verify_list=$(sftp_ls "$OPNSENSE_PCAP_DIR/lan-${DAY}_*.pcap*" | sort); then
-      echo "[homenetsec] ERROR: PCAP verify failed (SFTP list failed)." >&2
-      return 1
-    fi
+    # Re-list source files
+    local -a vfiles=()
+    while IFS= read -r -d '' filepath; do
+      vfiles+=("$filepath")
+    done < <(find "$PCAP_SOURCE_DIR" -maxdepth 1 -type f -name "lan-${DAY}_*.pcap*" -print0 2>/dev/null | sort -z)
 
-    mapfile -t vfiles <<< "$verify_list"
     local vtotal=${#vfiles[@]}
     if (( vtotal > skip_newest_n )); then
       local vupto=$(( vtotal - skip_newest_n ))
 
       # Copy any missing files (one more attempt), then re-verify.
-      local -a missing_remotes=()
+      local -a missing_sources=()
       for (( i=0; i<vupto; i++ )); do
-        local r="${vfiles[$i]}"
-        [[ -z "$r" ]] && continue
+        local src="${vfiles[$i]}"
+        [[ -z "$src" ]] && continue
         local b
-        b=$(basename "$r")
+        b=$(basename "$src")
         if [[ ! -f "$PCAP_DIR/$b" ]]; then
-          missing_remotes+=("$r")
+          missing_sources+=("$src")
         fi
       done
 
-      if (( ${#missing_remotes[@]} > 0 )); then
-        echo "[homenetsec] WARN: PCAP verification found ${#missing_remotes[@]} missing file(s); attempting catch-up copy"
-        local r
-        for r in "${missing_remotes[@]}"; do
+      if (( ${#missing_sources[@]} > 0 )); then
+        echo "[homenetsec] WARN: PCAP verification found ${#missing_sources[@]} missing file(s); attempting catch-up copy"
+        local src
+        for src in "${missing_sources[@]}"; do
           local b
-          b=$(basename "$r")
-          echo "[homenetsec] pulling(missing) $r"
-          ${scp_base[@]} "$OPNSENSE_USER@$OPNSENSE_HOST:$r" "$PCAP_DIR/$b" >/dev/null || true
+          b=$(basename "$src")
+          echo "[homenetsec] copying(missing) $src"
+          cp "$src" "$PCAP_DIR/$b" || true
         done
       fi
 
       local missing=0
       for (( i=0; i<vupto; i++ )); do
-        local r="${vfiles[$i]}"
-        [[ -z "$r" ]] && continue
+        local src="${vfiles[$i]}"
+        [[ -z "$src" ]] && continue
         local b
-        b=$(basename "$r")
+        b=$(basename "$src")
         if [[ ! -f "$PCAP_DIR/$b" ]]; then
           echo "[homenetsec] ERROR: missing expected local pcap after catch-up: $PCAP_DIR/$b" >&2
           missing=1
@@ -357,11 +342,12 @@ run_rita_docker() {
   fi
 
   local chunk
-  chunk=$(python3 - "$DAY" <<'PY'
+  chunk=$(python3 - "$DAY" "$RITA_ROLLING_WINDOW_DAYS" <<'PY'
 import datetime, sys
 s=sys.argv[1]
+window=int(sys.argv[2])
 d=datetime.date.fromisoformat(s)
-print(d.toordinal() % 7)
+print(d.toordinal() % window)
 PY
 )
 
@@ -370,12 +356,12 @@ PY
   # Copy the host config into the workdir so it's available via bind mount
   install -m 0644 "$RITA_CFG_HOST" "$RITA_DATA_DIR/rita-config.yaml"
 
-  echo "[homenetsec] rita(docker) rolling import for $DAY (dataset=zeek_rolling chunk=$chunk)"
-  compose --profile rita run --rm rita --config "$cfg" import --rolling --numchunks 7 --chunk "$chunk" --delete "/logs-flat/$DAY" zeek_rolling
+  echo "[homenetsec] rita(docker) rolling import for $DAY (dataset=zeek_rolling chunk=$chunk window=${RITA_ROLLING_WINDOW_DAYS}d)"
+  compose --profile rita run --rm rita --config "$cfg" import --rolling --numchunks "$RITA_ROLLING_WINDOW_DAYS" --chunk "$chunk" --delete "/logs-flat/$DAY" zeek_rolling
 
   local out="$RITA_DATA_DIR/rita-summary-${DAY}.txt"
   {
-    echo "RITA summary (rolling window: 7 days; dataset=zeek_rolling; chunk=$chunk)";
+    echo "RITA summary (rolling window: ${RITA_ROLLING_WINDOW_DAYS} days; dataset=zeek_rolling; chunk=$chunk)";
     echo;
     echo "Top beacons:";
     compose --profile rita run --rm rita --config "$cfg" show-beacons zeek_rolling 2>/dev/null | head -n 5 || echo "(no beacons / unsupported)";
@@ -825,7 +811,7 @@ main() {
     --out "$CANDIDATES_PATH" || true
 
   {
-    echo "Network security daily report ($DAY)"
+    echo "Network security report ($DAY)"
     echo "Generated: $(date)"
     echo
     summarize_zeek_basic
@@ -853,6 +839,10 @@ PY
 
   cleanup_old_pcaps
   cleanup_old_zeek_logs
+
+  # Update dashboard with new reports and candidates
+  ( cd "$ROOT_DIR" && HOMENETSEC_WORKDIR="$WORKDIR" ./scripts/generate_dashboard.sh "$DAY" ) || \
+    echo "[homenetsec] WARN: dashboard generation failed"
 
   echo "$REPORT_PATH"
 }

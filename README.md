@@ -20,40 +20,42 @@ HomeNetSec is split into **two pipelines** that can be scheduled independently:
 
 You can also run a **single “full pipeline”** schedule that runs both back-to-back.
 
-### A) Download + processing pipeline (recommended cadence: hourly)
+### A) Download + processing pipeline (ingest cadence aligned with your cron)
 
 Entry point:
-- `scripts/hourly_ingest_merge_process.sh`
+- `scripts/pcap_ingest_merge_process.sh`
 
 **Goal:** keep PCAP processing incremental and avoid spinning up containers for each tiny PCAP.
 
 What it does:
-1. Downloads **eligible new PCAPs since the last contiguous ingest** (tracked via `output/state/hourly_ingest_state.json`). This state is *gap-safe*: it retains a retry list of missing/failed segments so older uncopied files are still fetched later.
+1. Downloads **eligible new PCAPs since the last contiguous ingest** (tracked via `output/state/ingest_state.json`; the script will upgrade legacy `hourly_ingest_state.json` automatically). This state is *gap-safe*: it retains a retry list of missing/failed segments so older uncopied files are still fetched later.
 2. Applies **partial protections**:
    - skips newest `PULL_SKIP_NEWEST_N` remote files (default: 1)
    - ignores anything newer than `now - SAFETY_LAG_SECONDS` (default: 120s)
 3. Merges that batch into one PCAP via `mergecap`.
 4. Verifies the merge (packet count of merged PCAP equals sum of inputs) and retries once if needed.
-5. Deletes the source PCAP files after a verified merge.
+5. **Deletes the source PCAP files** after a verified merge.
 6. Runs **Suricata + Zeek** on the merged PCAP.
 
-Retention defaults:
-- merged PCAPs: **7 days**
-- Suricata EVE outputs + Zeek logs from merged runs: **30 days**
+Retention defaults (optimized for analysis quality vs disk usage):
+- merged PCAPs: **3 days** (conserves disk space; source PCAPs deleted immediately after merge)
+- Suricata EVE outputs + Zeek logs: **30 days** minimum (needed for RITA's rolling window + baseline analysis)
+  - Recommended: 60 days for better baseline/anomaly detection
+  - Logs are tiny (~50-100 MB/day) compared to PCAPs (~5-20 GB/day)
 
-### B) Analysis + dashboard pipeline (recommended cadence: 2×/day or hourly)
+### B) Analysis + dashboard pipeline (triggered whenever you refresh reports)
 
 This pipeline does **not** pull PCAPs and does **not** rerun Zeek/Suricata. It consumes the Zeek outputs from the download/processing pipeline.
 
 Typical command sequence:
-- `env SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0 ./scripts/run_daily.sh YYYY-MM-DD`
+- `env SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0 ./scripts/run_analysis_pipeline.sh YYYY-MM-DD`
 - `./scripts/triage_digest.py --day YYYY-MM-DD --workdir "$HOMENETSEC_WORKDIR"`
 - `./scripts/generate_dashboard.sh YYYY-MM-DD`
 
 ### C) Full pipeline (ingest + analysis + dashboard)
 
 If you want everything updated together, run:
-1) `scripts/hourly_ingest_merge_process.sh`
+1) `scripts/pcap_ingest_merge_process.sh`
 2) then the analysis + dashboard pipeline above
 
 ## What this does (high level)
@@ -64,8 +66,8 @@ If you want everything updated together, run:
 ## Repo / skill layout
 
 - `SKILL.md` — OpenClaw skill metadata + minimal usage notes
-- `scripts/hourly_ingest_merge_process.sh` — hourly ingest (download new pcaps, merge, verify, delete inputs, Suricata+Zeek on merged)
-- `scripts/run_daily.sh` — report generator (RITA + baselines + candidates + report; can optionally run full pull/zeek if enabled)
+- `scripts/pcap_ingest_merge_process.sh` — PCAP ingest/processing (download new pcaps, merge, verify, delete inputs, Suricata+Zeek on merged)
+- `scripts/run_analysis_pipeline.sh` — report generator (RITA + baselines + candidates + report; can optionally run full pull/zeek if enabled)
 - `scripts/run_and_send_openclaw.sh` — OpenClaw wrapper (optionally run ingest + analysis, then send Telegram)
 - `scripts/pull_recent_pcaps.sh` — helper: pull last N hours worth of pcaps (kept for debugging)
 - `assets/docker-compose.yml` — Zeek + RITA + Mongo + Suricata stack
@@ -88,10 +90,10 @@ Expected path:
 
 - `$HOMENETSEC_WORKDIR/pcaps/YYYY-MM-DD/lan-YYYY-MM-DD_*.pcap*`
 
-The default `run_daily.sh` includes a pull step tailored to my environment (SFTP pull from an OPNsense host; supports non-interactive SSH accounts without shell access). If you don’t have that, you can:
+The default `run_analysis_pipeline.sh` includes a copy step that reads PCAPs from a local source directory. You can:
 
-- disable/replace the pull step, and
-- just drop your PCAPs into the folder above.
+- configure `PCAP_SOURCE_DIR` to point to where your PCAPs are collected, or
+- disable the copy step and just drop your PCAPs into the folder above.
 
 ### DNS input (resolver telemetry)
 
@@ -135,35 +137,33 @@ cd HomeNetSec
 docker compose --env-file .env -f assets/dashboard-compose.yml up -d
 ```
 
-### OPNsense PCAP ingest (environment-specific)
+### PCAP source configuration
 
-HomeNetSec pulls PCAPs using **SFTP** (not remote shell commands), which allows use of locked-down SSH accounts (no interactive shell).
+HomeNetSec copies PCAPs from a local source directory for processing.
 
-Required env vars (recommend storing in an uncommitted file like `~/.openclaw/credentials/opnsense.env` and sourcing it in cron):
+Required env var:
 
-- `OPNSENSE_HOST` (required)
-- `OPNSENSE_USER`
-- `OPNSENSE_KEY` (path to SSH private key)
-- `OPNSENSE_PCAP_DIR`
+- `PCAP_SOURCE_DIR` — local directory where PCAPs are collected (REQUIRED - must be configured in `.env`)
+  - PCAPs are merged into `$HOMENETSEC_WORKDIR/output/pcaps/` and then deleted from source
+  - Merged PCAPs are retained for 3 days
 
-### Hourly ingest controls
+### Ingest controls
 
-- `PULL_SKIP_NEWEST_N` — skip newest N remote PCAP files when pulling (default: `1`)
+- `PULL_SKIP_NEWEST_N` — skip newest N PCAP files when copying (default: `1`)
 - `SAFETY_LAG_SECONDS` — ignore files newer than `now - lag` (default: `120`)
 - `MERGE_RETRIES` — retries for merge+verify (default: `1`)
 - `VERIFY_MERGE` — verify merged packet counts (default: `1`)
-- `DELETE_MERGED_INPUTS` — delete per-ingest raw PCAPs after verified merge (default: `1`)
 - Retention:
-  - `MERGED_PCAP_RETENTION_DAYS` (default: `7`)
-  - `HOURLY_ARTIFACT_RETENTION_DAYS` (default: `30`)
+  - `MERGED_PCAP_RETENTION_DAYS` (default: `3` - PCAPs are large; logs contain extracted intelligence)
+  - `HOURLY_ARTIFACT_RETENTION_DAYS` (default: `30` - recommend `60` for better baseline analysis)
   - `RUN_RETENTION_CLEANUP` (default: `1`)
 
 ### Reporting/digest controls
 
-`run_and_send_openclaw.sh` runs `run_daily.sh` in *report-only mode* (no extra PCAP pull and no extra Zeek/Suricata pass).
-You can override by running `run_daily.sh` directly.
+`run_and_send_openclaw.sh` runs `run_analysis_pipeline.sh` in *report-only mode* (no extra PCAP pull and no extra Zeek/Suricata pass).
+You can override by running `run_analysis_pipeline.sh` directly.
 
-### Pipeline toggles (used by run_daily.sh)
+### Pipeline toggles (used by run_analysis_pipeline.sh)
 
 - `RUN_RITA` — set to `0` to skip RITA (default: `1`)
 - `RUN_JA4` — set to `0` to skip Suricata TLS fingerprint extraction when running full pipeline (default: `1`)
@@ -178,12 +178,12 @@ You can override by running `run_daily.sh` directly.
 
 ## Running
 
-### Hourly ingest (download new pcaps, merge, Suricata+Zeek)
+### Ingest pipeline (download new pcaps, merge, Suricata+Zeek)
 
 ```bash
 cd HomeNetSec
 export HOMENETSEC_WORKDIR="$PWD/output"
-./scripts/hourly_ingest_merge_process.sh
+./scripts/pcap_ingest_merge_process.sh
 ```
 
 ### Analysis pipeline (RITA + triage digest + dashboard)
@@ -194,7 +194,7 @@ export HOMENETSEC_WORKDIR="$PWD/output"
 DAY="$(TZ=America/New_York date +%F)"
 
 # reporting + RITA (does NOT pull pcaps; does NOT run Zeek)
-env SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0 ./scripts/run_daily.sh "$DAY"
+env SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0 ./scripts/run_analysis_pipeline.sh "$DAY"
 
 # deterministic triage digest enrichment
 ./scripts/triage_digest.py --day "$DAY" --workdir "$HOMENETSEC_WORKDIR"
@@ -213,7 +213,7 @@ export HOMENETSEC_WORKDIR="$PWD/output"
 ./scripts/run_and_send_openclaw.sh
 ```
 
-(Delivery is intentionally separated from analysis; you can run analysis on a schedule and only send messages when desired.)
+(Delivery is intentionally separated from analysis; you can adjust the behavior with `RUN_INGEST_BEFORE_REPORT=0` if your cron already runs the ingest pipeline before the wrapper.)
 
 ### Ad-hoc: generate report for a specific day (report-only)
 
@@ -223,15 +223,15 @@ export HOMENETSEC_WORKDIR="$PWD/output"
 export SKIP_PCAP_PULL=1
 export SKIP_ZEEK=1
 export RUN_JA4=0
-./scripts/run_daily.sh 2026-02-06
+./scripts/run_analysis_pipeline.sh 2026-02-06
 ```
 
 ## Modularity notes (how to adapt this to your network)
 
 The cleanest way to adapt HomeNetSec is to treat it as layers:
 
-1. **Ingest layer**: get PCAPs into `$HOMENETSEC_WORKDIR/pcaps/YYYY-MM-DD/` (hourly job pulls from OPNsense)
-2. **Hourly analysis layer**: merge + Suricata + Zeek
+1. **Ingest layer**: get PCAPs into `$HOMENETSEC_WORKDIR/pcaps/YYYY-MM-DD/` (ingest pipeline pulls from your PCAP source)
+2. **Processing layer**: merge + Suricata + Zeek
 3. **Reporting layer**: flatten Zeek logs + RITA + baselines/candidates + report generation
 4. **Delivery layer**: send the report to your preferred destination
 

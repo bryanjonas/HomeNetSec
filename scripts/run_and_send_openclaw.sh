@@ -9,11 +9,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Source .env if present (for HOMENETSEC_WORKDIR, etc.)
 [[ -f "$ROOT_DIR/.env" ]] && set -a && source "$ROOT_DIR/.env" && set +a
 
-WORKDIR="${HOMENETSEC_WORKDIR:-$ROOT_DIR/output}"
+# WORKDIR is REQUIRED - must be set in .env
+if [[ -z "${HOMENETSEC_WORKDIR:-}" ]]; then
+  echo "[homenetsec] ERROR: HOMENETSEC_WORKDIR not set. Please configure in .env file." >&2
+  exit 2
+fi
+WORKDIR="$HOMENETSEC_WORKDIR"
 if [[ "${WORKDIR##*/}" != "output" ]]; then
   WORKDIR="$WORKDIR/output"
 fi
-PIPELINE="$ROOT_DIR/scripts/run_daily.sh"
+PIPELINE="$ROOT_DIR/scripts/run_analysis_pipeline.sh"
 
 CONFIG_JSON="${OPENCLAW_CONFIG_JSON:-$HOME/.openclaw/openclaw.json}"
 CHAT_ID="${OPENCLAW_TELEGRAM_CHAT_ID:-}"
@@ -41,18 +46,18 @@ fi
 TODAY_ET="$(TZ=America/New_York date +%F)"
 REPORT_PATH="$WORKDIR/reports/${TODAY_ET}.txt"
 
-# Hourly-style ingest/catch-up before daily run (download new pcaps since last ingest,
-# merge them, run Suricata+Zeek on the merged pcap). This keeps the local cache warm and
-# reduces per-PCAP container churn.
-if [[ "${RUN_HOURLY_INGEST_BEFORE_DAILY:-1}" == "1" ]]; then
-  echo "[$(ts)] [homenetsec] hourly_ingest: start"
+#
+# Run the ingest/processing pipeline before the analysis/reporting pipeline
+# so we always merge the latest PCAPs, run Suricata/Zeek, and warm the cache.
+if [[ "${RUN_INGEST_BEFORE_REPORT:-1}" == "1" ]]; then
+  echo "[$(ts)] [homenetsec] ingest pipeline: start"
   ( cd "$ROOT_DIR" && \
     HOMENETSEC_WORKDIR="$WORKDIR" \
     PULL_SKIP_NEWEST_N="${PULL_SKIP_NEWEST_N:-1}" \
     SAFETY_LAG_SECONDS="${SAFETY_LAG_SECONDS:-120}" \
-    ./scripts/hourly_ingest_merge_process.sh ) || \
-    echo "[$(ts)] [homenetsec] WARN: hourly_ingest failed; continuing with daily pipeline"
-  echo "[$(ts)] [homenetsec] hourly_ingest: end"
+    ./scripts/pcap_ingest_merge_process.sh ) || \
+    echo "[$(ts)] [homenetsec] WARN: ingest pipeline failed; continuing with analysis/reporting pipeline"
+  echo "[$(ts)] [homenetsec] ingest pipeline: end"
 fi
 
 if [[ -z "$CHAT_ID" ]]; then
