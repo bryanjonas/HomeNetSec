@@ -176,7 +176,10 @@ run_zeek_docker() {
   fi
 
   shopt -s nullglob
-  local pcaps=("$PCAP_DIR"/lan-${DAY}_*.pcap*)
+  local pcaps=("$PCAP_DIR"/merged-*.pcap)
+  if (( ${#pcaps[@]} == 0 )); then
+    pcaps=("$PCAP_DIR"/lan-${DAY}_*.pcap*)
+  fi
   if (( ${#pcaps[@]} == 0 )); then
     echo "[homenetsec] No local pcaps to process for $DAY at $PCAP_DIR"
     return 0
@@ -295,35 +298,53 @@ run_suricata_ja4() {
 
   echo "[homenetsec] suricata(docker) ja4 extraction for $DAY"
 
-  # Prefer a single merged pcap if present (created by hourly ingest), else use the newest local pcap.
-  local pcap_path=""
-  shopt -s nullglob
+  # Prefer merged PCAPs produced by hourly ingest. Process all merged files so
+  # backlog runs don't miss JA4 data.
   local merged=("$PCAP_DIR"/merged-*.pcap)
+  local eve_inputs=()
   if (( ${#merged[@]} > 0 )); then
-    pcap_path="/pcaps/$DAY/$(basename "${merged[-1]}")"
+    local pcap bn eve_name eve_path pcap_in_container
+    for pcap in "${merged[@]}"; do
+      bn=$(basename "$pcap")
+      eve_name="eve-${bn%.pcap}.json"
+      eve_path="$WORKDIR/suricata/$DAY/$eve_name"
+      pcap_in_container="/pcaps/$DAY/$bn"
+
+      if [[ ! -s "$eve_path" ]]; then
+        compose --profile ja4 run --rm -e DAY="$DAY" -e PCAP="$pcap_in_container" -e EVE_NAME="$eve_name" suricata-offline || {
+          echo "[homenetsec] WARN: suricata run failed for $bn; continuing"
+          continue
+        }
+      fi
+
+      if [[ -s "$eve_path" ]]; then
+        eve_inputs+=("$eve_path")
+      fi
+    done
   else
-    local pcaps=("$PCAP_DIR"/*.pcap*)
-    if (( ${#pcaps[@]} > 0 )); then
-      pcap_path="/pcaps/$DAY/$(basename "${pcaps[-1]}")"
+    # Fallback for non-merged workflow: keep existing behavior and analyze newest pcap.
+    local pcap_path="/pcaps/$DAY/$(basename "${pcaps[-1]}")"
+    compose --profile ja4 run --rm -e DAY="$DAY" -e PCAP="$pcap_path" suricata-offline || {
+      echo "[homenetsec] WARN: suricata run failed; continuing"
+      return 0
+    }
+
+    local eve="$WORKDIR/suricata/$DAY/eve.json"
+    if [[ -s "$eve" ]]; then
+      eve_inputs+=("$eve")
     fi
   fi
 
-  if [[ -z "$pcap_path" ]]; then
-    echo "[homenetsec] No pcaps found for JA4 extraction at $PCAP_DIR"
+  if (( ${#eve_inputs[@]} == 0 )); then
+    echo "[homenetsec] WARN: no suricata eve logs available for JA4 extraction ($DAY)"
     return 0
   fi
 
-  compose --profile ja4 run --rm -e DAY="$DAY" -e PCAP="$pcap_path" suricata-offline || {
-    echo "[homenetsec] WARN: suricata run failed; continuing";
-    return 0;
-  }
-
-  local eve="$WORKDIR/suricata/$DAY/eve.json"
-  if [[ -f "$eve" ]]; then
-    python3 "$ROOT_DIR/scripts/ja4_extract.py" --day "$DAY" --eve "$eve" --db "$BASELINE_DB" || true
-  else
-    echo "[homenetsec] WARN: suricata eve.json missing at $eve"
-  fi
+  # ja4_extract.py overwrites day-level aggregates on each run, so merge all
+  # relevant EVE files first and import once.
+  local eve_merged="$WORKDIR/suricata/$DAY/eve.ja4-aggregate.json"
+  cat "${eve_inputs[@]}" > "$eve_merged"
+  python3 "$ROOT_DIR/scripts/ja4_extract.py" --day "$DAY" --eve "$eve_merged" --db "$BASELINE_DB" || true
 }
 
 run_rita_docker() {
