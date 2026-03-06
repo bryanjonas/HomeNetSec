@@ -1,6 +1,6 @@
 ---
 name: home-netsec
-description: Run and maintain the HomeNetSec network security pipeline. The PCAP processing pipeline (local copy → merge+verify+delete inputs → Suricata+Zeek) can be scheduled separately from the analysis pipeline (RITA/reporting → triage digest → dashboard). Optional Telegram delivery via OpenClaw wrapper. Use for packaging, running, troubleshooting, or refactoring the HomeNetSec workflow.
+description: Run and maintain the HomeNetSec network security pipeline. The PCAP processing pipeline (gap-safe selection → merge+verify → manifest tracking → delayed source deletion → Suricata+Zeek) can be scheduled separately from the analysis pipeline (RITA/reporting → triage digest → dashboard). Optional Telegram delivery via OpenClaw wrapper. Use for packaging, running, troubleshooting, or refactoring the HomeNetSec workflow.
 ---
 
 # HomeNetSec
@@ -15,7 +15,7 @@ This skill bundles the HomeNetSec ingest + analysis pipeline.
 
 ## Entry points
 
-- `scripts/pcap_ingest_merge_process.sh` — PCAP ingest/processing (download new pcaps since last ingest, merge+verify, delete inputs, run Suricata+Zeek)
+- `scripts/pcap_ingest_merge_process.sh` — PCAP ingest/processing (select new pcaps since last ingest, skip already-merged inputs, merge+verify, write manifests, delayed delete, run Suricata+Zeek)
 - `scripts/run_analysis_pipeline.sh` — analysis/reporting pipeline (RITA + baselines/candidates + report; can be run in report-only mode)
 - `scripts/run_and_send_openclaw.sh` — OpenClaw wrapper (optionally run ingest + analysis, then send Telegram)
 

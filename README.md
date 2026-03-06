@@ -15,12 +15,12 @@ The design is intentionally modular so you can swap out **how PCAPs arrive** (OP
 
 HomeNetSec is split into **two pipelines** that can be scheduled independently:
 
-1) **Download + processing pipeline** (PCAP ingest → merge → Suricata + Zeek)
+1) **Ingest + processing pipeline** (PCAP ingest → merge → Suricata + Zeek)
 2) **Analysis + dashboard pipeline** (RITA/reporting → triage digest → dashboard update)
 
 You can also run a **single “full pipeline”** schedule that runs both back-to-back.
 
-### A) Download + processing pipeline (ingest cadence aligned with your cron)
+### A) Ingest + processing pipeline (ingest cadence aligned with your cron)
 
 Entry point:
 - `scripts/pcap_ingest_merge_process.sh`
@@ -28,24 +28,26 @@ Entry point:
 **Goal:** keep PCAP processing incremental and avoid spinning up containers for each tiny PCAP.
 
 What it does:
-1. Downloads **eligible new PCAPs since the last contiguous ingest** (tracked via `output/state/ingest_state.json`; the script will upgrade legacy `hourly_ingest_state.json` automatically). This state is *gap-safe*: it retains a retry list of missing/failed segments so older uncopied files are still fetched later.
-2. Applies **partial protections**:
-   - skips newest `PULL_SKIP_NEWEST_N` remote files (default: 1)
-   - ignores anything newer than `now - SAFETY_LAG_SECONDS` (default: 120s)
-3. Merges that batch into one PCAP via `mergecap`.
-4. Verifies the merge (packet count of merged PCAP equals sum of inputs) and retries once if needed.
-5. **Deletes the source PCAP files** after a verified merge.
-6. Runs **Suricata + Zeek** on the merged PCAP.
+1. Reads **eligible new PCAPs since the last contiguous ingest** (tracked via `output/state/ingest_state.json`). This state is *gap-safe*: it retains a retry list of missing/failed segments so older unprocessed files are still picked up later.
+2. Applies a **safety lag** and ignores anything newer than `now - SAFETY_LAG_SECONDS` (default: 120s).
+3. Backfills destination-side merge manifests for recent merged PCAPs when enough source files still exist to reconstruct the membership.
+4. Skips source PCAPs that are already represented by a merged PCAP manifest in the destination tree.
+5. Merges the remaining batch into one PCAP via `mergecap`.
+6. Verifies the merge (packet count of merged PCAP equals sum of inputs) and retries once if needed.
+7. Writes a JSON manifest beside the merged PCAP so future runs know exactly which source files are already covered.
+8. Runs **Suricata + Zeek** on the merged PCAP.
+9. Deletes merged source PCAPs **after 48 hours** by default, not immediately.
 
 Retention defaults (optimized for analysis quality vs disk usage):
-- merged PCAPs: **3 days** (conserves disk space; source PCAPs deleted immediately after merge)
+- merged PCAPs: **3 days**
+- merged source PCAPs in `PCAP_SOURCE_DIR`: **48 hours** after successful merge (`SOURCE_PCAP_DELETE_DELAY_HOURS=48`)
 - Suricata EVE outputs + Zeek logs: **30 days** minimum (needed for RITA's rolling window + baseline analysis)
   - Recommended: 60 days for better baseline/anomaly detection
   - Logs are tiny (~50-100 MB/day) compared to PCAPs (~5-20 GB/day)
 
 ### B) Analysis + dashboard pipeline (triggered whenever you refresh reports)
 
-This pipeline does **not** pull PCAPs and does **not** rerun Zeek/Suricata. It consumes the Zeek outputs from the download/processing pipeline.
+This pipeline does **not** pull PCAPs and does **not** rerun Zeek/Suricata. It consumes the Zeek outputs from the ingest/processing pipeline.
 
 Typical command sequence:
 - `env SKIP_PCAP_PULL=1 SKIP_ZEEK=1 RUN_JA4=0 ./scripts/run_analysis_pipeline.sh YYYY-MM-DD`
@@ -60,13 +62,13 @@ If you want everything updated together, run:
 
 ## What this does (high level)
 
-- Download/processing: PCAP ingest → merge → Suricata + Zeek
+- Ingest/processing: PCAP ingest → merge → Suricata + Zeek
 - Analysis/dashboard: RITA + baselines/candidates → triage digest → dashboard
 
 ## Repo / skill layout
 
 - `SKILL.md` — OpenClaw skill metadata + minimal usage notes
-- `scripts/pcap_ingest_merge_process.sh` — PCAP ingest/processing (download new pcaps, merge, verify, delete inputs, Suricata+Zeek on merged)
+- `scripts/pcap_ingest_merge_process.sh` — PCAP ingest/processing (select new pcaps, skip already-merged inputs, merge, verify, write manifests, delayed delete, Suricata+Zeek on merged)
 - `scripts/run_analysis_pipeline.sh` — report generator (RITA + baselines + candidates + report; can optionally run full pull/zeek if enabled)
 - `scripts/run_and_send_openclaw.sh` — OpenClaw wrapper (optionally run ingest + analysis, then send Telegram)
 - `scripts/pull_recent_pcaps.sh` — helper: pull last N hours worth of pcaps (kept for debugging)
@@ -144,15 +146,18 @@ HomeNetSec copies PCAPs from a local source directory for processing.
 Required env var:
 
 - `PCAP_SOURCE_DIR` — local directory where PCAPs are collected (REQUIRED - must be configured in `.env`)
-  - PCAPs are merged into `$HOMENETSEC_WORKDIR/output/pcaps/` and then deleted from source
+  - PCAPs are merged into `$HOMENETSEC_WORKDIR/output/pcaps/`
+  - A `.manifest.json` sidecar is written for each merged PCAP
+  - Source PCAPs are deleted from `PCAP_SOURCE_DIR` after the configured delay, not immediately
   - Merged PCAPs are retained for 3 days
 
 ### Ingest controls
 
-- `PULL_SKIP_NEWEST_N` — skip newest N PCAP files when copying (default: `1`)
 - `SAFETY_LAG_SECONDS` — ignore files newer than `now - lag` (default: `120`)
 - `MERGE_RETRIES` — retries for merge+verify (default: `1`)
 - `VERIFY_MERGE` — verify merged packet counts (default: `1`)
+- `SOURCE_PCAP_DELETE_DELAY_HOURS` — delay before deleting successfully merged source PCAPs from `PCAP_SOURCE_DIR` (default: `48`)
+- `RECENT_MERGE_INDEX_BACKFILL_HOURS` — backfill window for reconstructing missing merge manifests from recent merged PCAPs (default: `36`)
 - Retention:
   - `MERGED_PCAP_RETENTION_DAYS` (default: `3` - PCAPs are large; logs contain extracted intelligence)
   - `HOURLY_ARTIFACT_RETENTION_DAYS` (default: `30` - recommend `60` for better baseline analysis)
@@ -178,13 +183,23 @@ You can override by running `run_analysis_pipeline.sh` directly.
 
 ## Running
 
-### Ingest pipeline (download new pcaps, merge, Suricata+Zeek)
+### Ingest pipeline (select new pcaps, merge, Suricata+Zeek)
 
 ```bash
 cd HomeNetSec
 export HOMENETSEC_WORKDIR="$PWD/output"
 ./scripts/pcap_ingest_merge_process.sh
 ```
+
+### Backfill Recent Merge Index Only
+
+```bash
+cd HomeNetSec
+export HOMENETSEC_WORKDIR="$PWD/output"
+./scripts/pcap_ingest_merge_process.sh --backfill-index-only
+```
+
+This reconstructs missing `.manifest.json` sidecars for recent merged PCAPs when the underlying source PCAPs are still available.
 
 ### Analysis pipeline (RITA + triage digest + dashboard)
 
