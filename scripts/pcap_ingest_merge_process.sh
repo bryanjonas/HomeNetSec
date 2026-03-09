@@ -22,7 +22,7 @@ if ! bash -n "$0"; then
   exit 2
 fi
 
-# Hourly ingest:
+# Ingest pipeline:
 # - Download all new PCAPs since last successful ingest
 # - Merge the downloaded set into a single PCAP
 # - Run Suricata + Zeek on the merged PCAP
@@ -868,7 +868,7 @@ if (( merge_performed == 1 )); then
   eve_name="eve-${merge_name%.pcap}.json"
 
   log_info "suricata(docker) -> $merge_name (eve=$eve_name)"
-  if compose --profile ja4 run --rm -e DAY="$merge_day" -e PCAP="$merged_in_container" -e EVE_NAME="$eve_name" suricata-offline; then
+  if compose --profile ja4 run --rm --user "$(id -u):$(id -g)" -e DAY="$merge_day" -e PCAP="$merged_in_container" -e EVE_NAME="$eve_name" suricata-offline; then
     :
   else
     rc=$?
@@ -876,7 +876,7 @@ if (( merge_performed == 1 )); then
   fi
 
   log_info "zeek(docker) -> $merge_name"
-  if compose --profile zeek run --rm -e PCAP="$merged_in_container" zeek-offline; then
+  if compose --profile zeek run --rm --user "$(id -u):$(id -g)" -e PCAP="$merged_in_container" zeek-offline; then
     :
   else
     rc=$?

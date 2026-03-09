@@ -1,4 +1,4 @@
-# OpenClaw netsec docker stack (offline Zeek + optional RITA)
+# HomeNetSec docker stack (offline Zeek + optional RITA)
 #
 # IMPORTANT: HOMENETSEC_WORKDIR must be set before running docker compose.
 # The scripts handle this automatically by sourcing .env.
@@ -105,6 +105,7 @@ services:
     volumes:
       - ${HOMENETSEC_WORKDIR}/zeek-logs:/logs:ro
       - ${HOMENETSEC_WORKDIR}/zeek-flat:/logs-flat:ro
+      - ${HOMENETSEC_RITA_STAGING_DIR:-${HOMENETSEC_WORKDIR}/state/zeek-flat-staging}:/logs-flat-staging:ro
       - ${HOMENETSEC_WORKDIR}/rita-data:/out
     environment:
       - RITA_MONGODB_URI=mongodb://mongo:27017/rita

@@ -15,13 +15,16 @@ services:
     environment:
       - HOMENETSEC_STATE_DIR=/state
       - PYTHONDONTWRITEBYTECODE=1
+      - HOMENETSEC_MIN_ALERT_CONFIDENCE=${HOMENETSEC_MIN_ALERT_CONFIDENCE:-0}
+      - HOMENETSEC_ALERT_SEVERITIES=${HOMENETSEC_ALERT_SEVERITIES:-critical,high,med,low,info}
     volumes:
       - ${HOMENETSEC_WORKDIR}/state:/state
       - ./dashboard-api:/app:ro
+      - ../scripts:/scripts:ro
     working_dir: /app
     entrypoint: ["/bin/sh", "-lc"]
     command: >
-      'pip install --no-cache-dir flask gunicorn >/dev/null &&
+      'pip install --no-cache-dir -r requirements.txt >/dev/null &&
        exec gunicorn -w 1 -b 0.0.0.0:8000 app:app'
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]

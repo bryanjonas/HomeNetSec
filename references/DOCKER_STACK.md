@@ -4,7 +4,7 @@ This replaces native Zeek with a dockerized, offline workflow.
 
 ## Directory mounts (host)
 
-All paths are relative to `/home/openclaw/.openclaw/workspace/HomeNetSec/`:
+All paths are relative to `/home/<user>/HomeNetSec/`:
 
 - `pcaps/` — merged PCAP staging area plus `.manifest.json` sidecars
 - `zeek-logs/` — Zeek output (conn.log, dns.log, ssl.log, etc.)
@@ -25,21 +25,21 @@ The ingest script:
 Primary entry point:
 
 ```bash
-cd /home/openclaw/.openclaw/workspace/HomeNetSec
+cd /home/<user>/HomeNetSec
 ./scripts/pcap_ingest_merge_process.sh
 ```
 
 ## Bring up Mongo (only when running RITA)
 
 ```bash
-cd /home/openclaw/.openclaw/workspace/HomeNetSec/assets
+cd /home/<user>/HomeNetSec/assets
 docker compose --profile rita up -d mongo
 ```
 
 ## Run Zeek on a PCAP (one-shot)
 
 ```bash
-cd /home/openclaw/.openclaw/workspace/HomeNetSec/assets
+cd /home/<user>/HomeNetSec/assets
 docker compose --profile zeek run --rm zeek-offline /pcaps/2026-02-05/lan-2026-02-05_2000.pcap
 ```
 
@@ -49,7 +49,7 @@ Output ends up in:
 ## Run RITA on Zeek logs for a day (one-shot)
 
 ```bash
-cd /home/openclaw/.openclaw/workspace/HomeNetSec/assets
+cd /home/<user>/HomeNetSec/assets
 docker compose --profile rita run --rm rita-batch 2026-02-05
 ```
 
@@ -66,7 +66,7 @@ If you want to keep **7 days of merged PCAPs**, raise `MERGED_PCAP_RETENTION_DAY
 Example host cleanup (safe/recoverable if you use `trash-put`):
 
 ```bash
-find /home/openclaw/.openclaw/workspace/HomeNetSec/output/pcaps -type f -mtime +7 -print0 | xargs -0 -r trash-put
+find /home/<user>/HomeNetSec/output/pcaps -type f -mtime +7 -print0 | xargs -0 -r trash-put
 ```
 
 If you use the example above, include both merged PCAPs and their sidecar manifests.

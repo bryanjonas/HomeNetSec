@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HomeNetSec Live Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div>
+        <h1>🛡️ HomeNetSec</h1>
+      </div>
+      <div class="hero-meta">
+        <div class="meta-card">
+          <span>Last Refresh</span>
+          <strong id="last-refresh">Loading...</strong>
+        </div>
+        <div class="meta-card">
+          <span>Dashboard Build</span>
+          <strong id="dashboard-build">Loading...</strong>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel panel-wide">
+        <div class="panel-head">
+          <h2><span class="icon" aria-hidden="true">📈</span> Pipeline Status</h2>
+          <button id="refresh-button" class="button ghost" type="button">Refresh Now</button>
+        </div>
+        <div id="pipeline-status" class="metric-grid"></div>
+      </section>
+
+      <section class="panel panel-wide">
+        <div class="panel-head">
+          <h2><span class="icon" aria-hidden="true">🚨</span> Active Alerts</h2>
+          <span id="alert-count" class="panel-meta">0 alerts</span>
+        </div>
+        <div id="active-alerts" class="stack"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2><span class="icon" aria-hidden="true">👤</span> Unknown Devices</h2>
+          <span id="device-count" class="panel-meta">0 devices</span>
+        </div>
+        <div id="unknown-devices" class="stack compact"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2><span class="icon" aria-hidden="true">🌐</span> Network Health</h2>
+        </div>
+        <div id="network-health" class="stack compact"></div>
+      </section>
+
+    </main>
+  </div>
+
+      <template id="alert-template">
+    <article class="card alert-card">
+      <div class="card-head">
+        <div>
+          <p class="badge-row">
+            <span class="badge severity"></span>
+            <span class="badge kind"></span>
+          </p>
+          <h3 class="card-title"></h3>
+        </div>
+        <div class="card-actions">
+          <button class="button ghost details" type="button">Details</button>
+        </div>
+      </div>
+      <p class="card-copy"></p>
+      <dl class="detail-grid"></dl>
+    </article>
+  </template>
+
+  <template id="device-template">
+    <article class="card device-card">
+      <div class="card-head">
+        <div>
+          <h3 class="card-title"></h3>
+          <p class="card-copy"></p>
+        </div>
+        <div class="card-actions">
+          <button class="button ghost details" type="button">Details</button>
+        </div>
+      </div>
+    </article>
+  </template>
+
+  <aside id="detail-drawer" class="detail-drawer hidden" aria-live="polite">
+    <div class="detail-frame">
+      <div class="panel-head">
+        <div>
+          <p id="detail-kind" class="eyebrow">Details</p>
+          <h2 id="detail-title">Select an item</h2>
+        </div>
+        <button id="detail-close" class="button ghost" type="button">Close</button>
+      </div>
+      <div id="detail-meta" class="detail-grid"></div>
+      <section id="detail-triage-section" class="detail-section triage-panel">
+        <div class="panel-head">
+          <h3>Triage</h3>
+          <span id="detail-triage-badge" class="panel-meta">Pending</span>
+        </div>
+        <p id="detail-triage-summary" class="card-copy triage-summary">No triage summary available.</p>
+      </section>
+      <section id="alert-review-section" class="detail-section hidden">
+        <h3>Review</h3>
+        <div class="review-grid">
+          <label class="field">
+            <span>Verdict</span>
+            <select id="review-verdict">
+              <option value="likely_benign">Likely Benign</option>
+              <option value="needs_review">Needs Review</option>
+              <option value="likely_malicious">Likely Malicious</option>
+            </select>
+          </label>
+          <label class="field field-wide">
+            <span>Comment</span>
+            <textarea id="review-comment" rows="4" placeholder="Add review notes for future triage."></textarea>
+          </label>
+        </div>
+        <div id="detail-actions" class="card-actions">
+          <button id="review-resolve" class="button primary" type="button">Resolve</button>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
