@@ -158,7 +158,7 @@ function renderPipelineStatus(payload) {
       values: {
         Status: payload.ingest?.status,
         "Last Run": formatTimestamp(payload.ingest?.last_run),
-        "Gap Free Since": formatTimestamp(payload.coverage?.gap_free_since),
+        "Gap Free Since": formatTimestamp(payload.ingest?.gap_free_since),
         "PCAPs / 24h": payload.ingest?.pcaps_processed_24h ?? 0,
         "Errors / 24h": payload.ingest?.errors_24h ?? 0,
       },

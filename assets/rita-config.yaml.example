@@ -11,10 +11,10 @@ MongoDB:
     CAFile: ""
   MetaDB: MetaDatabase
 Rolling:
-  DefaultChunks: 24
-  rolling: false
+  DefaultChunks: 90
+  rolling: true
   currentchunk: 0
-  totalchunks: 0
+  totalchunks: 90
 LogConfig:
   LogLevel: 2
   RitaLogPath: /var/lib/rita/logs

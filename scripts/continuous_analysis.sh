@@ -219,7 +219,7 @@ run_rita_continuous() {
 
   install -m 0644 "$RITA_CFG_HOST" "$WORKDIR/rita-data/rita-config.yaml"
   if ! compose --profile rita run --rm rita \
-    --config /out/rita-config.yaml import /logs-flat-staging zeek_continuous; then
+    --config /out/rita-config.yaml import --rolling /logs-flat-staging zeek_continuous; then
     log_error "Continuous RITA import failed"
     python3 "$ROOT_DIR/scripts/generate_pipeline_status.py" \
       --workdir "$WORKDIR" \
